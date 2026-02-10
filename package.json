@@ -1,0 +1,48 @@
+{
+  "name": "jscanify",
+  "version": "2.0.0",
+  "description": "Open-source Javascript document scanner with auto-capture and quality assessment.",
+  "main": "src/jscanify-node.js",
+  "exports": {
+    ".": {
+      "default": "./src/jscanify-node.js"
+    },
+    "./client": {
+      "default": "./src/jscanify.js"
+    },
+    "./quality": {
+      "default": "./src/quality.js"
+    },
+    "./auto-capture": {
+      "default": "./src/document-auto-capture.js"
+    }
+  },
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "mocha --trace-uncaught"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/puffinsoft/jscanify.git"
+  },
+  "keywords": [
+    "js",
+    "scanner",
+    "document-scanner"
+  ],
+  "author": "ColonelParrot",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/puffinsoft/jscanify/issues"
+  },
+  "homepage": "https://colonelparrot.github.io/jscanify/",
+  "dependencies": {
+    "canvas": "^3.1.0",
+    "jsdom": "^26.0.0"
+  },
+  "devDependencies": {
+    "mocha": "^11.1.0"
+  }
+}
