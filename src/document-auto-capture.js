@@ -95,6 +95,14 @@
       this.ctx = canvasElement.getContext('2d');
 
       try {
+        // Check for secure context (required for camera access)
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error(
+            'Camera access requires a secure context (HTTPS or localhost). ' +
+            'Try accessing via localhost instead of an IP address.'
+          );
+        }
+
         // Request camera access
         this.stream = await navigator.mediaDevices.getUserMedia({
           video: this.config.video,
