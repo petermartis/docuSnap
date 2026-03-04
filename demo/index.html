@@ -676,9 +676,10 @@
             video.srcObject = stream;
             await video.play();
             
-            // Set canvas size
+            // Set canvas size and tell CSS the aspect ratio so height: auto works correctly
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
+            canvas.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
             
             // Start auto-capture
             autoCapture.start();
