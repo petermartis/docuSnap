@@ -1694,13 +1694,11 @@ function renderOcrDetails(data) {
                '<span class="ocr-val">' + p[1] + '</span>';
     });
     inner = '<div class="ocr-fields">' + inner + '</div>';
-  } else if (status && !statusOk) {
-    inner = '<div style="color:#ff4757;font-size:11px;padding:6px 0;">Recognition failed — ' +
-            'the document was not identified. Check image quality and try again.</div>';
   } else {
-    // Fallback: dump raw JSON if we can't parse known fields
-    inner = '<pre style="color:#aaa;font-size:10px;white-space:pre-wrap;overflow:auto;max-height:200px;">' +
-            JSON.stringify(data, null, 2).slice(0, 3000) + '</pre>';
+    // No known fields extracted — always dump the raw response so we can
+    // see the real recognitionStatus value and response shape.
+    inner = '<pre style="color:#aaa;font-size:10px;white-space:pre-wrap;overflow:auto;max-height:240px;">' +
+            JSON.stringify(data, null, 2).slice(0, 4000) + '</pre>';
   }
 
   ocrDetailsEl.style.display = 'block';
