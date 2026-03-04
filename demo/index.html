@@ -55,11 +55,18 @@
         width: 100%;
         max-height: 50vh;
         overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
 
+      /* width/height both auto so the canvas respects aspect-ratio (set via JS)
+         under both max-width and max-height constraints — handles landscape AND
+         portrait camera streams without stretch */
       #canvas {
-        width: 100%;
+        width: auto;
         height: auto;
+        max-width: 100%;
         max-height: 50vh;
         display: block;
       }
@@ -70,13 +77,13 @@
         overflow-y: auto;
       }
     }
-    
+
     /* Landscape mode: side by side */
     @media (orientation: landscape) and (min-width: 769px) {
       .capture-area {
         flex-direction: row;
       }
-      
+
       .video-container {
         flex: 1;
         min-width: 0;
@@ -84,16 +91,17 @@
         align-items: center;
         justify-content: center;
       }
-      
+
+      /* aspect-ratio set via JS; width/height auto + max constraints
+         let the browser fit the canvas without distortion */
       #canvas {
+        width: auto;
+        height: auto;
         max-width: 100%;
         max-height: calc(100vh - 120px);
         max-height: calc(100dvh - 120px);
-        width: auto;
-        height: auto;
-        object-fit: contain;
       }
-      
+
       .result-container {
         width: 320px;
         flex-shrink: 0;
