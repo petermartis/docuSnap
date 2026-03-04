@@ -994,12 +994,22 @@
       }
     }
 
-    // Fallback: sort by angle from centroid
+    // Fallback: sort clockwise by angle from centroid, then rotate so TL (min x+y) is first.
+    // A plain sorted[0..3] assignment only works if the TL corner happens to have the
+    // most-negative angle, which is not guaranteed for all document orientations.
     if (!tl || !tr || !br || !bl) {
-      var sorted = pts.slice().sort(function (a, b) {
+      var angSorted = pts.slice().sort(function (a, b) {
         return Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx);
       });
-      tl = sorted[0]; tr = sorted[1]; br = sorted[2]; bl = sorted[3];
+      // Find the index of the corner with the smallest x+y sum (closest to top-left)
+      var tlIdx = 0;
+      for (var fi = 1; fi < 4; fi++) {
+        if (angSorted[fi].x + angSorted[fi].y < angSorted[tlIdx].x + angSorted[tlIdx].y) tlIdx = fi;
+      }
+      tl = angSorted[tlIdx];
+      tr = angSorted[(tlIdx + 1) % 4];
+      br = angSorted[(tlIdx + 2) % 4];
+      bl = angSorted[(tlIdx + 3) % 4];
     }
 
     return [tl, tr, br, bl];
@@ -1752,7 +1762,16 @@
         // Draw video frame at full opacity
         canvasCtx.drawImage(offscreen, 0, 0);
         
-        // Draw spotlight effect and document overlay
+        // Draw spotlight effect and document overlay.
+        // Guard: after Kalman smoothing, corners can cross (bowtie) when the detector
+        // assigns different physical corners to the same label on consecutive frames.
+        // Drawing a self-intersecting quad is always wrong, so reset on detection.
+        if (this._displayCorners && !this._isCornersConvex(this._displayCorners)) {
+          this._displayCorners = null;
+          this._stableCorners = null;
+          this._kalmanFilters = null;
+        }
+
         if (this._displayCorners) {
           this._drawSpotlightOverlay(canvasCtx, this._displayCorners, report, offscreen.width, offscreen.height);
         } else {
@@ -1952,6 +1971,32 @@
     }
 
     /**
+     * @private - Returns true when cornerPoints form a strictly convex polygon
+     * in the draw order TL → TR → BR → BL.
+     *
+     * After Kalman smoothing, two adjacent corners can cross if the detector
+     * assigned different physical corners to the same label on successive frames.
+     * Drawing that crossing quad produces a bowtie that is geometrically invalid
+     * and visually confusing.  This guard detects the crossing and signals that
+     * the display state should be reset.
+     */
+    _isCornersConvex(cp) {
+      var pts = [cp.topLeftCorner, cp.topRightCorner, cp.bottomRightCorner, cp.bottomLeftCorner];
+      var sign = 0;
+      for (var i = 0; i < 4; i++) {
+        var a = pts[i];
+        var b = pts[(i + 1) % 4];
+        var c = pts[(i + 2) % 4];
+        var cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+        if (Math.abs(cross) < 1e-6) continue; // collinear — skip
+        var s = cross > 0 ? 1 : -1;
+        if (sign === 0) { sign = s; }
+        else if (s !== sign) { return false; }
+      }
+      return sign !== 0; // all same sign → convex; sign===0 means degenerate
+    }
+
+    /**
      * @private - Calculate target overlay opacity based on quality metrics
      * Returns 0-70 where 0 = fully transparent (good quality), 70 = most opaque (poor quality)
      * Good quality = clear view of document, poor quality = white overlay blocking view
@@ -2087,25 +2132,49 @@
   // ===========================================================================
 
   var CaptureCapability = {
+    /**
+     * Returns true when the page is running inside any kind of WebView or
+     * in-app browser where getUserMedia is typically unavailable or silently fails.
+     *
+     * Covers:
+     *  • Social media in-app browsers  (Facebook, Instagram, Twitter/X, WeChat, …)
+     *  • Hybrid framework runtimes     (React Native, Capacitor, Cordova)
+     *  • Generic native-app wrappers   (apps that set "WebView" in the UA)
+     *  • Android Chrome WebView        ("wv" flag in the UA parenthetical comment)
+     *  • iOS WKWebView                 (AppleWebKit present; "Safari/NNN" token absent —
+     *                                   real Safari and all iOS browsers must include it)
+     */
+    isWebView: function () {
+      var ua = navigator.userAgent || "";
+      // Social / messaging in-app browsers
+      if (/FBAN|FBAV|Instagram|Line\/|Twitter\/|Snapchat|LinkedIn\/|MicroMessenger|TelegramBot/i.test(ua)) return true;
+      // Hybrid framework runtimes
+      if (/ReactNative|Capacitor\/|Cordova\//i.test(ua)) return true;
+      // Generic WebView marker set by many native-app wrappers
+      if (/WebView/i.test(ua)) return true;
+      // Android Chrome WebView: Chrome appends "wv" token inside its UA parenthetical
+      if (/\bwv\b/.test(ua)) return true;
+      // iOS WKWebView: iPhone/iPad UA contains AppleWebKit but omits the "Safari/NNN"
+      // version token that real Safari and every iOS browser is required to append
+      if (/iPhone|iPad|iPod/.test(ua) && /AppleWebKit/i.test(ua) && !/Safari\/\d/.test(ua)) return true;
+      return false;
+    },
+
     hasGetUserMedia: function () {
       return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
     },
-    hasFileCapture: function () {
-      var input = document.createElement("input");
-      return input.capture !== undefined;
-    },
-    isInAppWebView: function () {
-      var ua = navigator.userAgent || "";
-      return /FBAN|FBAV|Instagram|Line\/|Twitter|Snapchat|LinkedIn|MicroMessenger|TelegramBot/i.test(ua);
-    },
+
+    /**
+     * Returns "auto"  – live getUserMedia stream is available and safe to use.
+     *         "file"  – use <input type="file"> with native camera (universal fallback).
+     *
+     * Note: <input type="file"> is supported everywhere; there is no "none" case.
+     */
     detect: function () {
-      if (CaptureCapability.hasGetUserMedia() && !CaptureCapability.isInAppWebView()) {
+      if (CaptureCapability.hasGetUserMedia() && !CaptureCapability.isWebView()) {
         return "auto";
       }
-      if (CaptureCapability.hasFileCapture()) {
-        return "file";
-      }
-      return "none";
+      return "file";
     }
   };
 
@@ -2123,6 +2192,7 @@
       this._allowSkip = options.allowSkipQuality || false;
       this._fileInput = null;
       this._built = false;
+      this._currentPreviewUrl = null; // blob: URL for current photo; revoked on reset
     }
 
     start() {
@@ -2135,8 +2205,17 @@
 
     stop() {
       if (this._built) {
+        this._revokePreviewUrl();
         this._container.innerHTML = "";
         this._built = false;
+      }
+    }
+
+    /** @private */
+    _revokePreviewUrl() {
+      if (this._currentPreviewUrl) {
+        URL.revokeObjectURL(this._currentPreviewUrl);
+        this._currentPreviewUrl = null;
       }
     }
 
@@ -2148,14 +2227,18 @@
       this._fileInput = document.createElement("input");
       this._fileInput.type = "file";
       this._fileInput.accept = "image/*";
-      this._fileInput.capture = "environment";
+      // Only set capture="environment" on mobile — on desktop this attribute suppresses
+      // the file picker and forces camera-only, which is unwanted behaviour.
+      if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+        this._fileInput.capture = "environment";
+      }
       this._fileInput.style.display = "none";
       this._fileInput.addEventListener("change", function () {
         self._handleFile(this.files);
       });
 
       this._captureBtn = document.createElement("button");
-      this._captureBtn.textContent = "Take Photo of Document";
+      this._captureBtn.textContent = "📷 Take Photo of Document";
       this._captureBtn.className = "docusnap-fallback-btn";
       this._captureBtn.addEventListener("click", function () {
         self._fileInput.click();
@@ -2177,6 +2260,7 @@
 
     /** @private */
     _reset() {
+      this._revokePreviewUrl();
       if (this._statusEl) this._statusEl.textContent = "";
       if (this._previewEl) this._previewEl.innerHTML = "";
       if (this._actionsEl) this._actionsEl.innerHTML = "";
@@ -2184,127 +2268,206 @@
       if (this._fileInput) this._fileInput.value = "";
     }
 
-    /** @private */
+    /**
+     * @private
+     * Entry point when the user selects a file.  Shows a loading spinner while
+     * the image is processed, then calls _assessImage() with an EXIF-corrected
+     * image source.
+     *
+     * Strategy:
+     *  1. Create a blob: URL for preview display — modern browsers automatically
+     *     apply EXIF rotation when rendering blob: URLs in <img> elements.
+     *  2. Use createImageBitmap(file, {imageOrientation:'from-image'}) to obtain
+     *     EXIF-corrected pixel data for detection and extraction.
+     *  3. Fall back to FileReader + HTMLImageElement on older browsers.
+     */
     _handleFile(files) {
       if (!files || !files.length) return;
       var self = this;
       var file = files[0];
 
+      // Revoke any previous blob URL and show loading state immediately
+      this._revokePreviewUrl();
+      this._captureBtn.style.display = "none";
+      this._statusEl.innerHTML =
+        '<span class="docusnap-fallback-loading-text">Analyzing photo\u2026</span>';
+      this._previewEl.innerHTML =
+        '<div class="docusnap-fallback-loading">' +
+        '<div class="docusnap-fallback-spinner"></div>' +
+        '</div>';
+      this._actionsEl.innerHTML = "";
+
+      // Blob URL for display; the browser handles EXIF rotation for us
+      this._currentPreviewUrl = URL.createObjectURL(file);
+      var previewUrl = this._currentPreviewUrl;
+
+      // Try EXIF-corrected bitmap first (Chrome 64+, Firefox 90+, Safari 15.4+)
+      if (typeof createImageBitmap === "function") {
+        createImageBitmap(file, { imageOrientation: "from-image" })
+          .then(function (bitmap) {
+            self._assessImage(bitmap, previewUrl);
+          })
+          .catch(function () {
+            // Browser supports createImageBitmap but not the options form (older Safari)
+            self._handleFileViaReader(file, previewUrl);
+          });
+      } else {
+        self._handleFileViaReader(file, previewUrl);
+      }
+    }
+
+    /** @private — FileReader + HTMLImageElement fallback (no EXIF correction) */
+    _handleFileViaReader(file, previewUrl) {
+      var self = this;
       var reader = new FileReader();
       reader.onload = function (e) {
         var img = new Image();
-        img.onload = function () {
-          self._assessImage(img, e.target.result);
-        };
+        img.onload = function () { self._assessImage(img, previewUrl); };
         img.src = e.target.result;
       };
       reader.readAsDataURL(file);
     }
 
-    /** @private */
-    async _assessImage(imageEl, imageDataUrl) {
+    /**
+     * @private
+     * @param {ImageBitmap|HTMLImageElement} imageSource  EXIF-corrected image
+     * @param {string}                       previewUrl   blob: URL for <img> display
+     *
+     * Downscales large phone photos to ≤1920 px on the longest edge before running
+     * the Hough detector (avoids multi-second stalls on 12 MP images).  Corner points
+     * from the downscaled detection are scaled back to full resolution for extraction.
+     */
+    async _assessImage(imageSource, previewUrl) {
       var self = this;
+      var MAX_DETECT_DIM = 1920;
 
-      // Draw to canvas and get pixel data
-      var canvas = document.createElement("canvas");
-      canvas.width = imageEl.naturalWidth || imageEl.width;
-      canvas.height = imageEl.naturalHeight || imageEl.height;
-      var ctx = canvas.getContext("2d");
-      ctx.drawImage(imageEl, 0, 0);
-      var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      try {
+        var srcW = imageSource.naturalWidth  || imageSource.width;
+        var srcH = imageSource.naturalHeight || imageSource.height;
 
-      // Detect document (synchronous)
-      var detection = this._scanner._detector.detect(
-        imgData.data, canvas.width, canvas.height
-      );
-      var cornerPoints = detection ? detection.cornerPoints : null;
+        // --- Downscale for detection if the photo is large ---
+        var scale = Math.min(1, MAX_DETECT_DIM / Math.max(srcW, srcH));
+        var detW  = Math.round(srcW * scale);
+        var detH  = Math.round(srcH * scale);
 
-      // Assess quality
-      var report = this._scanner.assessQuality(
-        imgData.data, canvas.width, canvas.height, cornerPoints, this._thresholds
-      );
-      this._onQualityReport(report);
+        var detCanvas = document.createElement("canvas");
+        detCanvas.width  = detW;
+        detCanvas.height = detH;
+        var detCtx = detCanvas.getContext("2d");
+        detCtx.drawImage(imageSource, 0, 0, detW, detH);
+        var imgData = detCtx.getImageData(0, 0, detW, detH);
 
-      // Show preview
-      this._previewEl.innerHTML = "";
-      var previewImg = document.createElement("img");
-      previewImg.src = imageDataUrl;
-      previewImg.style.maxWidth = "100%";
-      previewImg.style.borderRadius = "8px";
-      this._previewEl.appendChild(previewImg);
+        // --- Detect document corners on the (possibly downscaled) image ---
+        var detection   = this._scanner._detector.detect(imgData.data, detW, detH);
+        var detCorners  = detection ? detection.cornerPoints : null;
 
-      this._actionsEl.innerHTML = "";
-
-      if (report.allPassed) {
-        this._statusEl.textContent = "Quality check passed";
-        this._captureBtn.style.display = "none";
-        
-        // Extract perspective-corrected document if corners detected
-        var extractedDataUrl = null;
-        if (cornerPoints) {
-          try {
-            var cp = cornerPoints;
-            var _topW = Math.hypot(cp.topRightCorner.x - cp.topLeftCorner.x, cp.topRightCorner.y - cp.topLeftCorner.y);
-            var _botW = Math.hypot(cp.bottomRightCorner.x - cp.bottomLeftCorner.x, cp.bottomRightCorner.y - cp.bottomLeftCorner.y);
-            var _lefH = Math.hypot(cp.bottomLeftCorner.x - cp.topLeftCorner.x, cp.bottomLeftCorner.y - cp.topLeftCorner.y);
-            var _rigH = Math.hypot(cp.bottomRightCorner.x - cp.topRightCorner.x, cp.bottomRightCorner.y - cp.topRightCorner.y);
-            var _avgW = (_topW + _botW) / 2;
-            var _avgH = (_lefH + _rigH) / 2;
-            var _longSide = 856;
-            var docWidth = _avgW >= _avgH ? _longSide : Math.round(_longSide * _avgW / _avgH);
-            var docHeight = _avgW >= _avgH ? Math.round(_longSide * _avgH / _avgW) : _longSide;
-            var extracted = this._scanner.extractPaper(imageEl, docWidth, docHeight, cornerPoints, { margin: 0.25 });
-            if (extracted) {
-              extractedDataUrl = extracted.toDataURL("image/jpeg", 0.95);
-            }
-          } catch (e) {
-            console.error("docuSnap fallback: extraction error:", e);
+        // Scale corner coordinates back to full-resolution space for extraction
+        var fullCorners = null;
+        if (detCorners) {
+          if (scale < 1) {
+            var inv = 1 / scale;
+            fullCorners = {
+              topLeftCorner:     { x: detCorners.topLeftCorner.x     * inv, y: detCorners.topLeftCorner.y     * inv },
+              topRightCorner:    { x: detCorners.topRightCorner.x    * inv, y: detCorners.topRightCorner.y    * inv },
+              bottomRightCorner: { x: detCorners.bottomRightCorner.x * inv, y: detCorners.bottomRightCorner.y * inv },
+              bottomLeftCorner:  { x: detCorners.bottomLeftCorner.x  * inv, y: detCorners.bottomLeftCorner.y  * inv },
+            };
+          } else {
+            fullCorners = detCorners;
           }
         }
-        
-        this._onCapture({
-          imageData: imageDataUrl,
-          extractedData: extractedDataUrl,
-          cornerPoints: cornerPoints,
-          qualityReport: report,
-        });
-      } else {
-        var issues = [];
-        var checks = report.checks;
-        if (!checks.cornersFound.pass) issues.push("document not fully visible");
-        else if (!checks.cornersWithinMargin.pass) issues.push("document too close to edge");
-        if (!checks.documentSize.pass) issues.push("document too small in frame");
-        if (!checks.sharpness.pass) issues.push("image is blurry");
-        if (!checks.glare.pass) issues.push("glare detected");
-        if (!checks.brightness.pass) {
-          issues.push("too dark");
-        }
-        this._statusEl.textContent = "Quality issues: " + issues.join(", ") + ". Please retake.";
 
-        var retryBtn = document.createElement("button");
-        retryBtn.textContent = "Retake Photo";
-        retryBtn.className = "docusnap-fallback-btn";
-        retryBtn.addEventListener("click", function () {
-          self._reset();
-          self._fileInput.click();
-        });
-        this._actionsEl.appendChild(retryBtn);
+        // --- Quality assessment on detection-scale data + corners ---
+        var report = this._scanner.assessQuality(
+          imgData.data, detW, detH, detCorners, this._thresholds
+        );
+        this._onQualityReport(report);
 
-        if (this._allowSkip) {
-          var skipBtn = document.createElement("button");
-          skipBtn.textContent = "Use Anyway";
-          skipBtn.className = "docusnap-fallback-btn docusnap-fallback-btn-secondary";
-          skipBtn.addEventListener("click", function () {
-            self._captureBtn.style.display = "none";
-            self._actionsEl.innerHTML = "";
-            self._statusEl.textContent = "Photo accepted";
-            self._onCapture({
-              imageData: imageDataUrl,
-              cornerPoints: cornerPoints,
-              qualityReport: report,
-            });
+        // --- Render preview (blob URL; browser auto-applies EXIF rotation) ---
+        this._previewEl.innerHTML = "";
+        var previewImg = document.createElement("img");
+        previewImg.src = previewUrl;
+        previewImg.style.maxWidth  = "100%";
+        previewImg.style.borderRadius = "8px";
+        this._previewEl.appendChild(previewImg);
+        this._actionsEl.innerHTML = "";
+        this._statusEl.textContent = "";
+
+        if (report.allPassed) {
+          this._statusEl.textContent = "✅ Quality check passed";
+          this._captureBtn.style.display = "none";
+
+          // --- Perspective-correct extraction using full-resolution corners ---
+          var extractedDataUrl = null;
+          if (fullCorners) {
+            try {
+              var cp    = fullCorners;
+              var _topW = Math.hypot(cp.topRightCorner.x    - cp.topLeftCorner.x,    cp.topRightCorner.y    - cp.topLeftCorner.y);
+              var _botW = Math.hypot(cp.bottomRightCorner.x - cp.bottomLeftCorner.x, cp.bottomRightCorner.y - cp.bottomLeftCorner.y);
+              var _lefH = Math.hypot(cp.bottomLeftCorner.x  - cp.topLeftCorner.x,    cp.bottomLeftCorner.y  - cp.topLeftCorner.y);
+              var _rigH = Math.hypot(cp.bottomRightCorner.x - cp.topRightCorner.x,   cp.bottomRightCorner.y - cp.topRightCorner.y);
+              var _avgW = (_topW + _botW) / 2;
+              var _avgH = (_lefH + _rigH) / 2;
+              var _longSide = 856;
+              var docWidth  = _avgW >= _avgH ? _longSide : Math.round(_longSide * _avgW / _avgH);
+              var docHeight = _avgW >= _avgH ? Math.round(_longSide * _avgH / _avgW) : _longSide;
+              // imageSource (full-res ImageBitmap or HTMLImageElement) is used here
+              var extracted = this._scanner.extractPaper(imageSource, docWidth, docHeight, fullCorners, { margin: 0.25 });
+              if (extracted) extractedDataUrl = extracted.toDataURL("image/jpeg", 0.95);
+            } catch (e) {
+              console.error("docuSnap fallback: extraction error:", e);
+            }
+          }
+
+          this._onCapture({
+            imageData:      previewUrl,
+            extractedData:  extractedDataUrl,
+            cornerPoints:   fullCorners,
+            qualityReport:  report,
           });
-          this._actionsEl.appendChild(skipBtn);
+
+        } else {
+          var issues = [];
+          var checks = report.checks;
+          if (!checks.cornersFound.pass)         issues.push("document not fully visible");
+          else if (!checks.cornersWithinMargin.pass) issues.push("document too close to edge");
+          if (!checks.documentSize.pass)         issues.push("document too small in frame");
+          if (!checks.sharpness.pass)            issues.push("image is blurry");
+          if (!checks.glare.pass)                issues.push("glare detected");
+          if (!checks.brightness.pass)           issues.push("too dark — improve lighting");
+          this._statusEl.textContent = "⚠\uFE0F " + issues.join(" · ") + " — please retake.";
+
+          var retryBtn = document.createElement("button");
+          retryBtn.textContent = "🔄 Retake Photo";
+          retryBtn.className = "docusnap-fallback-btn";
+          retryBtn.addEventListener("click", function () {
+            self._reset();
+            self._fileInput.click();
+          });
+          this._actionsEl.appendChild(retryBtn);
+
+          if (this._allowSkip) {
+            var skipBtn = document.createElement("button");
+            skipBtn.textContent = "Use Anyway";
+            skipBtn.className = "docusnap-fallback-btn docusnap-fallback-btn-secondary";
+            skipBtn.addEventListener("click", function () {
+              self._captureBtn.style.display = "none";
+              self._actionsEl.innerHTML = "";
+              self._statusEl.textContent = "Photo accepted";
+              self._onCapture({
+                imageData:     previewUrl,
+                cornerPoints:  fullCorners,
+                qualityReport: report,
+              });
+            });
+            this._actionsEl.appendChild(skipBtn);
+          }
+        }
+
+      } finally {
+        // Free GPU memory held by ImageBitmap (no-op for HTMLImageElement)
+        if (imageSource && typeof imageSource.close === "function") {
+          imageSource.close();
         }
       }
     }

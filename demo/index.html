@@ -354,7 +354,7 @@
       text-align: center;
       padding: 40px;
     }
-    
+
     .loading-spinner {
       border: 4px solid #333;
       border-top: 4px solid #00d9ff;
@@ -364,10 +364,109 @@
       animation: spin 1s linear infinite;
       margin: 0 auto 15px;
     }
-    
+
     @keyframes spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
+    }
+
+    /* ── Fallback capture UI (WebView / file-input mode) ───────────────────── */
+
+    /* When in fallback mode the video-container becomes a plain flex column.    */
+    .video-container.fallback-mode {
+      background: transparent;
+      border-radius: 0;
+      overflow: visible;
+      max-height: none;
+      flex: 1;
+      align-items: flex-start;
+      justify-content: flex-start;
+    }
+
+    #fallbackContainer {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 24px 16px;
+      gap: 14px;
+      box-sizing: border-box;
+    }
+
+    .docusnap-fallback-btn {
+      width: 100%;
+      max-width: 300px;
+      padding: 14px 24px;
+      background: #00d9ff;
+      color: #000;
+      border: none;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.1s, opacity 0.2s;
+      font-family: inherit;
+    }
+    .docusnap-fallback-btn:hover  { transform: scale(1.02); }
+    .docusnap-fallback-btn:active { transform: scale(0.98); }
+
+    .docusnap-fallback-btn-secondary {
+      background: #2a2a44;
+      color: #ccc;
+      border: 1px solid #444;
+    }
+
+    .docusnap-fallback-status {
+      color: #ccc;
+      font-size: 13px;
+      text-align: center;
+      padding: 0 10px;
+      min-height: 18px;
+      line-height: 1.4;
+    }
+
+    .docusnap-fallback-preview {
+      width: 100%;
+      max-width: 380px;
+    }
+    .docusnap-fallback-preview img {
+      width: 100%;
+      height: auto;
+      border-radius: 8px;
+      border: 2px solid #2a2a44;
+      display: block;
+    }
+
+    .docusnap-fallback-actions {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+      max-width: 300px;
+      gap: 8px;
+    }
+
+    /* Spinner shown while analyzing the photo */
+    .docusnap-fallback-loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 30px;
+    }
+    .docusnap-fallback-spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid #2a2a44;
+      border-top-color: #00d9ff;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    .docusnap-fallback-loading-text {
+      color: #888;
+      font-size: 13px;
     }
   </style>
 </head>
@@ -385,6 +484,8 @@
         <div class="video-container">
           <video id="video" playsinline></video>
           <canvas id="canvas" width="640" height="480"></canvas>
+          <!-- Fallback UI: shown instead of canvas in WebView / file-capture mode -->
+          <div id="fallbackContainer" style="display:none;"></div>
         </div>
         
         <div class="result-container">
@@ -532,21 +633,97 @@
           statusEl.textContent = pass ? '✅' : '❌';
         }
         
-        // Detect capture capability (handles WebViews)
+        // Detect capture capability
         const capability = CaptureCapability.detect();
-        console.log('Capture capability:', capability);
-        
-        if (capability === 'none') {
-          alert('Camera capture is not supported on this device/browser.');
-        }
-        
+        console.log('Capture capability:', capability, '| isWebView:', CaptureCapability.isWebView());
+
         // Create scanner instance and initialize
         const scanner = new docuSnap();
         await scanner.init();
-        scanner._detector.debug = true;  // ← dump rejection counts every frame
+        scanner._detector.debug = true;
         console.log('Scanner initialized');
-        
-        // Create auto-capture with new API
+
+        // ── Shared helpers ──────────────────────────────────────────────────
+
+        /** Render a captured image into the result panel with a flash effect. */
+        function showCaptureResult(imgSrc) {
+          const img = new Image();
+          img.onload = () => {
+            result.innerHTML = '';
+            result.appendChild(img);
+            img.style.maxWidth = '100%';
+            img.style.borderRadius = '4px';
+          };
+          img.src = imgSrc;
+          result.style.boxShadow = '0 0 30px #2ed573';
+          setTimeout(() => result.style.boxShadow = 'none', 500);
+        }
+
+        /**
+         * Update all quality indicator widgets.
+         * Used by both the live-stream and file-capture paths so the right-hand
+         * panel always shows current quality data regardless of capture mode.
+         */
+        function handleQualityReport(report) {
+          const passed = report.allPassed;
+          scoreEl.textContent = passed ? '✅ Ready' : 'Adjusting...';
+          scoreEl.style.color  = passed ? '#2ed573' : '#ff4757';
+
+          const c = report.checks;
+
+          // Sharpness: calibrated so raw ~110 → display 50
+          const sharpnessNorm = Math.min(100, (c.sharpness.value / 219) * 100);
+          updateIndicator(indSharpness, indSharpnessStatus,
+            sharpnessNorm, c.sharpness.pass, v => v.toFixed(0));
+
+          // Brightness: calibrated so raw ~125 (mid-grey) → display ~70
+          const brightnessNorm = Math.min(100, (c.brightness.value / 178) * 100);
+          updateIndicator(indBrightness, indBrightnessStatus,
+            brightnessNorm, c.brightness.pass, v => v.toFixed(0));
+
+          updateIndicator(indGlare, indGlareStatus,
+            Math.min(100, Math.round(c.glare.value * 100)), c.glare.pass, v => v.toFixed(0));
+
+          updateIndicator(indDocSize, indDocSizeStatus,
+            c.documentSize.value * 100, c.documentSize.pass, v => v.toFixed(0) + '%');
+
+          updateIndicator(indCorners, indCornersStatus,
+            c.cornersFound.value ? (c.cornersWithinMargin.value ? 'OK' : 'Edge') : 'None',
+            c.cornersFound.pass && c.cornersWithinMargin.pass,
+            v => v);
+        }
+
+        // ── Fallback capture instance (created upfront; used in WebView mode  ──
+        // ── and as a recovery path when getUserMedia fails at runtime)         ──
+        const fallbackCapture = new DocumentCaptureFallback({
+          scanner: scanner,
+          containerElement: document.getElementById('fallbackContainer'),
+          thresholds: currentThresholds,
+          allowSkipQuality: true,
+          onCapture: (captureResult) => {
+            showCaptureResult(captureResult.extractedData || captureResult.imageData);
+            console.log('Fallback captured! Extracted:', !!captureResult.extractedData);
+          },
+          onQualityReport: handleQualityReport,
+        });
+
+        /**
+         * Switch to file-capture mode.
+         * Called either at startup (WebView detected) or when getUserMedia fails
+         * at runtime (e.g. permission denied, hardware unavailable).
+         */
+        function switchToFallback() {
+          canvas.style.display = 'none';
+          const fallbackEl = document.getElementById('fallbackContainer');
+          fallbackEl.style.display = '';
+          document.querySelector('.video-container').classList.add('fallback-mode');
+          startBtn.style.display = 'none';
+          stopBtn.style.display  = 'none';
+          captureBtn.style.display = 'none';
+          fallbackCapture.start();
+        }
+
+        // ── Live-stream auto-capture ────────────────────────────────────────
         const autoCapture = new DocumentAutoCapture({
           scanner: scanner,
           videoElement: video,
@@ -556,28 +733,11 @@
           frameIntervalMs: 100,
           thresholds: currentThresholds,
           onCapture: (captureResult) => {
-            // Load perspective-corrected extracted image (with margin)
-            const img = new Image();
-            img.onload = () => {
-              result.innerHTML = '';
-              result.appendChild(img);
-              img.style.maxWidth = '100%';
-              img.style.borderRadius = '4px';
-            };
-            // Use extractedData (perspective-corrected) if available, else fall back to raw
-            img.src = captureResult.extractedData || captureResult.imageData;
-            
-            // Flash effect
-            result.style.boxShadow = '0 0 30px #2ed573';
-            setTimeout(() => {
-              result.style.boxShadow = 'none';
-            }, 500);
-            
-            console.log('Captured! Extracted:', !!captureResult.extractedData);
+            showCaptureResult(captureResult.extractedData || captureResult.imageData);
+            console.log('Auto-captured! Extracted:', !!captureResult.extractedData);
           },
           onStateChange: (state, instruction) => {
             console.log('State:', state, instruction);
-            
             if (state === 'detecting' || state === 'stay_still') {
               issuesEl.style.display = 'block';
               issuesListEl.innerHTML = `<li>${instruction}</li>`;
@@ -587,139 +747,80 @@
               issuesListEl.innerHTML = '<li>✅ Document captured!</li>';
             }
           },
-          onQualityReport: (report) => {
-            // Update overall status
-            const passed = report.allPassed;
-            scoreEl.textContent = passed ? '✅ Ready' : 'Adjusting...';
-            scoreEl.style.color = passed ? '#2ed573' : '#ff4757';
-            
-            // Update individual indicators
-            const c = report.checks;
-            
-            // Normalize sharpness to 0-100
-            // Calibrated: raw ~110 should show ~50 (good handheld capture reference)
-            const sharpnessNorm = Math.min(100, (c.sharpness.value / 219) * 100);
-            updateIndicator(indSharpness, indSharpnessStatus, 
-              sharpnessNorm, c.sharpness.pass, v => v.toFixed(0));
-            
-            // Normalize brightness to 0-100
-            // Calibrated: raw ~125 (mid-gray) should show ~70 (good lighting reference)
-            const brightnessNorm = Math.min(100, (c.brightness.value / 178) * 100);
-            updateIndicator(indBrightness, indBrightnessStatus,
-              brightnessNorm, c.brightness.pass, v => v.toFixed(0));
-            
-            updateIndicator(indGlare, indGlareStatus,
-              Math.min(100, Math.round(c.glare.value * 100)), c.glare.pass, v => v.toFixed(0));
-            
-            updateIndicator(indDocSize, indDocSizeStatus,
-              c.documentSize.value * 100, c.documentSize.pass, v => v.toFixed(0) + '%');
-            
-            updateIndicator(indCorners, indCornersStatus,
-              c.cornersFound.value ? (c.cornersWithinMargin.value ? 'OK' : 'Edge') : 'None',
-              c.cornersFound.pass && c.cornersWithinMargin.pass,
-              v => v);
-          },
+          onQualityReport: handleQualityReport,
         });
-        
-        // Config apply handler - convert from normalized 0-100 to raw values
+
+        // ── Config apply ────────────────────────────────────────────────────
         applyConfigBtn.addEventListener('click', () => {
-          const sharpnessNorm = parseFloat(cfgSharpness.value) || 50;
+          const sharpnessNorm    = parseFloat(cfgSharpness.value)     || 50;
           const brightnessMinNorm = parseFloat(cfgBrightnessMin.value) || 50;
-          
+
           currentThresholds = {
-            sharpnessMin: (sharpnessNorm / 100) * 219,        // 0-100 -> 0-219 raw
-            brightnessMin: (brightnessMinNorm / 100) * 178,   // 0-100 -> 0-178 raw
-            glareMax: (parseFloat(cfgGlare.value) || 10) / 100,
-            glareThreshold: parseFloat(cfgGlareThreshold.value) || 248,
-            documentSizeMin: (parseFloat(cfgDocSize.value) || 30) / 100,
-            cornerMarginPx: parseFloat(cfgCornerMargin.value) || 10,
+            sharpnessMin:    (sharpnessNorm     / 100) * 219,
+            brightnessMin:   (brightnessMinNorm / 100) * 178,
+            glareMax:        (parseFloat(cfgGlare.value)          || 10)  / 100,
+            glareThreshold:   parseFloat(cfgGlareThreshold.value) || 248,
+            documentSizeMin: (parseFloat(cfgDocSize.value)         || 30)  / 100,
+            cornerMarginPx:   parseFloat(cfgCornerMargin.value)   || 10,
           };
-          autoCapture._thresholds = currentThresholds;
+          autoCapture._thresholds    = currentThresholds;
+          fallbackCapture._thresholds = currentThresholds;
           console.log('Thresholds updated:', currentThresholds);
           alert('Settings applied!');
         });
-        
-        // Fallback capture for WebViews (uses file input with native camera)
-        let fallbackCapture = null;
+
+        // ── Initial routing ─────────────────────────────────────────────────
         if (capability === 'file') {
-          // Hide video container, show fallback UI
-          document.querySelector('.video-container').innerHTML = '<div id="fallbackContainer" style="padding: 20px; text-align: center;"></div>';
-          fallbackCapture = new DocumentCaptureFallback({
-            scanner: scanner,
-            containerElement: document.getElementById('fallbackContainer'),
-            thresholds: currentThresholds,
-            allowSkipQuality: true,
-            onCapture: (captureResult) => {
-              const img = new Image();
-              img.onload = () => {
-                result.innerHTML = '';
-                result.appendChild(img);
-                img.style.maxWidth = '100%';
-                img.style.borderRadius = '4px';
-              };
-              img.src = captureResult.extractedData || captureResult.imageData;
-              result.style.boxShadow = '0 0 30px #2ed573';
-              setTimeout(() => result.style.boxShadow = 'none', 500);
-            },
-            onQualityReport: (report) => {
-              console.log('Fallback quality:', report);
-            },
-          });
-          fallbackCapture.start();
-          startBtn.style.display = 'none';
-          stopBtn.style.display = 'none';
-          captureBtn.style.display = 'none';
+          switchToFallback();
         }
-        
-        // Button handlers (only for 'auto' mode with getUserMedia)
+
+        // ── Button handlers (live-stream mode) ──────────────────────────────
         startBtn.addEventListener('click', async () => {
-          if (capability !== 'auto') return;
-          
           try {
-            // Request camera
             const stream = await navigator.mediaDevices.getUserMedia({
               video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
               audio: false,
             });
             video.srcObject = stream;
             await video.play();
-            
-            // Set canvas size and tell CSS the aspect ratio so height: auto works correctly
-            canvas.width = video.videoWidth;
+
+            // Set canvas size and give CSS the aspect-ratio so height:auto works
+            canvas.width  = video.videoWidth;
             canvas.height = video.videoHeight;
             canvas.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
-            
-            // Start auto-capture
+
             autoCapture.start();
-            
-            startBtn.disabled = true;
-            stopBtn.disabled = false;
+            startBtn.disabled  = true;
+            stopBtn.disabled   = false;
             captureBtn.disabled = false;
+
           } catch (err) {
-            alert('Camera error: ' + err.message);
+            // getUserMedia failed at runtime (permission denied, hardware busy, etc.)
+            // — gracefully fall back to native camera via file input
+            console.warn('getUserMedia failed (' + err.name + '); switching to file capture.');
+            switchToFallback();
           }
         });
-        
+
         stopBtn.addEventListener('click', () => {
           autoCapture.stop();
           if (video.srcObject) {
             video.srcObject.getTracks().forEach(t => t.stop());
             video.srcObject = null;
           }
-          startBtn.disabled = false;
-          stopBtn.disabled = true;
+          startBtn.disabled  = false;
+          stopBtn.disabled   = true;
           captureBtn.disabled = true;
           scoreEl.textContent = '-';
           issuesEl.style.display = 'none';
         });
-        
+
         captureBtn.addEventListener('click', () => {
-          // Manual capture - just take current frame
           const tempCanvas = document.createElement('canvas');
-          tempCanvas.width = video.videoWidth;
+          tempCanvas.width  = video.videoWidth;
           tempCanvas.height = video.videoHeight;
           tempCanvas.getContext('2d').drawImage(video, 0, 0);
-          
+
           const img = new Image();
           img.onload = () => {
             result.innerHTML = '';
@@ -728,7 +829,7 @@
           };
           img.src = tempCanvas.toDataURL('image/jpeg', 0.9);
         });
-        
+
         console.log('initApp completed successfully');
       } catch (e) {
         console.error('initApp error:', e);
