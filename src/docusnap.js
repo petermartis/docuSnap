@@ -1719,7 +1719,19 @@
     _tick() {
       var self = this;
       this._animFrameId = requestAnimationFrame(function (timestamp) {
-        if (self._state === State.IDLE || self._state === State.CAPTURED) return;
+        if (self._state === State.IDLE) return;
+
+        // When captured (waiting for nextSide / user interaction), keep the canvas
+        // alive so the video preview stays live during the flip prompt.
+        // No quality evaluation and no new captures fire in this state.
+        if (self._state === State.CAPTURED) {
+          if (self._canvas && self._video && self._video.videoWidth) {
+            var _cctx = self._canvas.getContext('2d');
+            _cctx.drawImage(self._video, 0, 0, self._canvas.width, self._canvas.height);
+          }
+          self._tick();
+          return;
+        }
 
         // Skip if still processing previous frame (async inference)
         if (self._evaluating) {
@@ -3106,7 +3118,14 @@
 
       // Gate auto-capture: if face presence is required and face is not yet confirmed,
       // keep resetting the stay-still countdown so capture never fires without a face.
-      if (this.faceConfig && this.faceConfig.requirePresent &&
+      // The global faceConfig.requirePresent only applies to side 0 (front) — subsequent
+      // sides (e.g. the back of an ID card) never have a face and must not be blocked.
+      // A per-side override via sideConfig[n].face.requirePresent enforces it on any side.
+      var _sideOverride = this._currentSideConfig();
+      var _sideFaceCfg  = (_sideOverride && _sideOverride.face != null) ? _sideOverride.face : null;
+      var _requireFace  = (_sideFaceCfg && _sideFaceCfg.requirePresent) ||
+                          (this.faceConfig && this.faceConfig.requirePresent && this._currentSide === 0);
+      if (_requireFace &&
           raw.state === State.STAY_STILL && this._autoCapture &&
           (!faceResult || !faceResult.present)) {
         this._autoCapture._stayStillStart = performance.now();
@@ -3140,15 +3159,13 @@
           if (self._autoCapture) { self._autoCapture.stop(); }
           self._scanState = 'paused';
         } else {
-          // More sides to scan — auto-resume the preview loop after 2 s so
-          // the canvas doesn't freeze while the caller reviews the capture
-          // and decides when to call snap.nextSide().
-          setTimeout(function () {
-            if (self._autoCapture && self._scanState === 'captured') {
-              self._autoCapture.reset();
-              self._scanState = 'ready';
-            }
-          }, 2000);
+          // Intermediate side captured — pause at the DocuSnap level.
+          // DocumentAutoCapture stays in its own CAPTURED state: the _tick loop
+          // keeps drawing the live video frame (canvas stays active for the user
+          // to see while reading the flip prompt) but will NOT fire another capture.
+          // Scanning resumes only when the integrator calls snap.nextSide(), which
+          // calls _autoCapture.reset() → increments side → starts fresh detection.
+          self._scanState = 'paused';
         }
       }).catch(function (err) {
         self._onError({ code: 'CAPTURE_ERROR', message: err.message, cause: err });

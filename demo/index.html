@@ -470,6 +470,89 @@
     .hbadge.fail    { color: #ff4757; }
     .hbadge.neutral { color: #aaa;    }
 
+    /* ─────────────────── External API actions ─────────────────── */
+    #apiActions {
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .api-btn-row {
+      display: flex; gap: 8px;
+      justify-content: center; flex-wrap: wrap;
+    }
+    .api-btn {
+      padding: 8px 18px;
+      border: none; border-radius: 6px;
+      font-size: 12px; font-weight: 700;
+      cursor: pointer; font-family: inherit;
+      transition: transform 0.1s, opacity 0.2s;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .api-btn:hover   { transform: scale(1.02); }
+    .api-btn:active  { transform: scale(0.97); }
+    .api-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .api-btn-liveness { background: #9b59b6; color: #fff; }
+    .api-btn-ocr      { background: #2980b9; color: #fff; }
+
+    /* One-line API result row */
+    #apiResultsRow {
+      display: none;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 6px 2px;
+      border-top: 1px solid #1e2a4a;
+    }
+    .api-cell {
+      display: flex; flex-direction: column;
+      background: #0f0f23;
+      padding: 4px 8px; border-radius: 4px;
+      min-width: 56px;
+    }
+    .api-cell-lbl { color: #555; font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .api-cell-val { color: #fff; font-family: monospace; font-size: 11px; }
+    .api-cell-val.green { color: #2ed573; }
+    .api-cell-val.red   { color: #ff4757; }
+    .api-cell-val.amber { color: #ffa502; }
+
+    /* OCR details panel */
+    #ocrDetails {
+      display: none;
+      background: #0f0f23;
+      border-radius: 8px;
+      padding: 10px 12px;
+      border-top: 2px solid #2980b9;
+    }
+    .ocr-hdr {
+      color: #2980b9; font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+    .ocr-fields {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 3px 10px;
+    }
+    .ocr-key { color: #666; font-size: 10px; white-space: nowrap; }
+    .ocr-val { color: #e0e0e0; font-size: 11px; font-family: monospace; word-break: break-all; }
+
+    /* History extras (liveness + OCR badges in history cards) */
+    .hbadge-ocr   { background: rgba(41,128,185,0.18); color: #5dade2; }
+    .hbadge-live  { background: rgba(155,89,182,0.18); }
+    .history-ocr  {
+      margin-top: 6px; font-size: 10px; color: #888;
+      font-style: italic; word-break: break-all;
+    }
+
+    /* Spinner */
+    .api-spin {
+      display: inline-block; width: 11px; height: 11px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff; border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+    }
+
     /* ─────────────────── Loading ─────────────────── */
     .loading { text-align: center; padding: 40px; }
     .loading-spinner {
@@ -667,6 +750,17 @@
         </div>
         <!-- Quality snapshot for this capture (2-col grid, face spans both) -->
         <div id="capturedQuality"></div>
+        <!-- External API actions: shown when Cropped tab is active or two-up is rendered -->
+        <div id="apiActions">
+          <div class="api-btn-row">
+            <button id="livenessBtn" class="api-btn api-btn-liveness">🔍 Check Liveness</button>
+            <button id="ocrBtn"      class="api-btn api-btn-ocr">📋 Send to OCR</button>
+          </div>
+          <!-- One-line results row (liveness + OCR summary badges) -->
+          <div id="apiResultsRow"></div>
+          <!-- OCR extracted fields panel -->
+          <div id="ocrDetails"></div>
+        </div>
       </div><!-- /.captured-card -->
     <!-- Flip prompt: shown between first and second side captures -->
     <div id="flipPrompt"></div>
@@ -722,6 +816,11 @@ const indFaceStatus       = document.getElementById('indFaceStatus');
 
 const qualityGrid    = document.querySelector('.quality-grid');
 const shutterFlash   = document.getElementById('shutterFlash');
+const apiActionsEl   = document.getElementById('apiActions');
+const apiResultsRow  = document.getElementById('apiResultsRow');
+const ocrDetailsEl   = document.getElementById('ocrDetails');
+const livenessBtn    = document.getElementById('livenessBtn');
+const ocrBtn         = document.getElementById('ocrBtn');
 const startBtn       = document.getElementById('startBtn');
 const stopBtn        = document.getElementById('stopBtn');
 const captureBtn     = document.getElementById('captureBtn');
@@ -788,7 +887,7 @@ async function startCapture(forceFile) {
   revokeCapturedUrls();
   resetResultPanel();
   // Reset throttled display state so a fresh session starts clean
-  _dispCode = null; _dispHint = ''; _dispEscalated = false; _dispSince = 0;
+  _dispCode = null; _dispHint = ''; _dispEscalated = false; _dispSince = -INSTRUCTION_MIN_MS;
 
   const cfg = buildConfig();
 
@@ -878,11 +977,16 @@ function showFallbackMode() {
 // different one.  State transitions (SEARCHING / CONFIRMED / HOLD_STILL) are
 // always applied immediately — they represent real workflow phase changes.
 const INSTRUCTION_MIN_MS = 1000;
-const INSTANT_CODES = new Set(['SEARCHING', 'CONFIRMED', 'HOLD_STILL']);
+// Only CONFIRMED and HOLD_STILL bypass the 1-second throttle.
+// SEARCHING is deliberately excluded: including it caused SEARCHING ↔ failure-code
+// flicker (every transition from SEARCHING resets the throttle, allowing the next
+// failure code to appear instantly, which in turn transitions back to SEARCHING
+// instantly, creating a per-frame oscillation).
+const INSTANT_CODES = new Set(['CONFIRMED', 'HOLD_STILL']);
 let _dispCode      = null;   // instruction code currently shown
 let _dispHint      = '';     // hint text currently shown
 let _dispEscalated = false;  // hintEscalated flag for the shown hint
-let _dispSince     = 0;      // performance.now() when _dispCode was last set
+let _dispSince     = -INSTRUCTION_MIN_MS;  // ensures the very first code always shows immediately
 
 function resolveDisplayCode(frame) {
   const code = frame.instructionCode;
@@ -1063,9 +1167,11 @@ function renderSingleCapture(urls, quality, face) {
     capturedTabs.style.display = 'flex';
     tabDoc.classList.add('active');
     tabFull.classList.remove('active');
+    showApiActions();
   } else {
     showResultImage(urls && urls.full);
     capturedTabs.style.display = 'none';
+    hideApiActions();
   }
   renderCapturedQuality(quality, face);
 }
@@ -1075,6 +1181,7 @@ function renderTwoUpCapture(sides) {
   capturedTabs.style.display      = 'none';
   capturedQualityEl.style.display = 'none';
   capturedQualityEl.innerHTML     = '';
+  showApiActions();
 
   const labels = ['Front', 'Back'];
   let html = '<div class="two-up">';
@@ -1124,7 +1231,7 @@ function showFlipPrompt(cr) {
     if (snap) {
       snap.nextSide();
       // Reset the instruction throttle for the fresh side
-      _dispCode = null; _dispHint = ''; _dispEscalated = false; _dispSince = 0;
+      _dispCode = null; _dispHint = ''; _dispEscalated = false; _dispSince = -INSTRUCTION_MIN_MS;
     }
   });
 }
@@ -1201,6 +1308,7 @@ function addToHistory(cr) {
   captureHistory.unshift({
     id: Date.now(), timestamp: cr.timestamp,
     thumbUrl, quality: cr.quality, face: cr.face, sideIndex: cr.sideIndex,
+    livenessResult: null, ocrResult: null,   // filled in after API calls
   });
   while (captureHistory.length > MAX_HISTORY) {
     const old = captureHistory.pop();
@@ -1237,6 +1345,40 @@ function renderHistory() {
         badges += '<span class="hbadge neutral">Face: –</span>';
       } else {
         badges += badge('Face: ' + (p ? 'Yes' : 'No'), p);
+      }
+    }
+
+    // Liveness badges
+    if (e.livenessResult) {
+      var ld  = e.livenessResult;
+      var agg = ld.aggregate_liveness_probability;
+      if (typeof agg === 'number') {
+        badges += '<span class="hbadge hbadge-live ' + (agg >= 0.5 ? 'pass' : 'fail') + '">' +
+                  '🔍 Live: ' + (agg * 100).toFixed(1) + '%</span>';
+      }
+      if (ld.pipeline_results) {
+        var pipeLabels = { 'default-sr': 'SR', 'default-pc': 'PC', 'default-ps': 'PS' };
+        ld.pipeline_results.forEach(function (pr) {
+          var prob = pr.result && typeof pr.result.liveness_probability === 'number'
+            ? (pr.result.liveness_probability * 100).toFixed(1) + '%'
+            : (pr.result && pr.result.status_code) || '–';
+          var pass2 = pr.result && pr.result.liveness_probability >= 0.5;
+          badges += '<span class="hbadge hbadge-live ' + (pass2 ? 'pass' : 'fail') + '">' +
+                    (pipeLabels[pr.pipeline_name] || pr.pipeline_name) + ': ' + prob + '</span>';
+        });
+      }
+    }
+
+    // OCR badge
+    var ocrName = '';
+    if (e.ocrResult) {
+      var r2 = e.ocrResult.result || e.ocrResult.recognizerResults || e.ocrResult;
+      function sv2(f) { return f && f.value ? f.value : (typeof f === 'string' ? f : ''); }
+      ocrName = [sv2(r2.firstName), sv2(r2.lastName)].filter(Boolean).join(' ');
+      var docNo2 = sv2(r2.documentNumber);
+      if (ocrName || docNo2) {
+        badges += '<span class="hbadge hbadge-ocr">' +
+                  '📋 ' + [ocrName, docNo2].filter(Boolean).join(' / ') + '</span>';
       }
     }
 
@@ -1280,6 +1422,12 @@ function resetResultPanel() {
   flipPromptEl.style.display      = 'none';
   sideSteps.style.display         = 'none';
   sideSteps.innerHTML             = '';
+  // Reset API actions
+  hideApiActions();
+  apiResultsRow.style.display     = 'none';
+  apiResultsRow.innerHTML         = '';
+  ocrDetailsEl.style.display      = 'none';
+  ocrDetailsEl.innerHTML          = '';
 }
 
 function revokeCapturedUrls() {
@@ -1288,6 +1436,223 @@ function revokeCapturedUrls() {
     if (u && u.doc)  URL.revokeObjectURL(u.doc);
   });
   sideObjectUrls = [];
+}
+
+// ── External API credentials ───────────────────────────────────────────────
+const IDRND_API_KEY   = 'ouwWh6b3AB7rOIVVF3I5daGP20M0ncq83S0funej';
+const MICROBLINK_AUTH = 'Bearer MmYxZjliMTAxYzkyNGQ2ZDg4N2FiN2NjNWM3ZWUzMTY6MzlmODY1OTEtMjMxMS00OTIwLTgxYzUtNzZhZTBkODM4YTYx';
+
+// ── API helpers ────────────────────────────────────────────────────────────
+function blobToBase64(blob) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onload  = function () { resolve(reader.result.split(',')[1]); };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** Always use the full-res cropped image of the front side (side 0). */
+function getFrontDocBlob() {
+  var side0 = capturedSides.find(function (cr) { return cr.sideIndex === 0; });
+  return side0 ? (side0.documentImage || side0.image) : null;
+}
+
+/** Show / hide the API actions panel (call when Cropped tab becomes active). */
+function showApiActions() {
+  if (!capturedSides.length) return;
+  apiActionsEl.style.display = 'flex';
+  // Re-render any previously fetched results for the current session
+  var he = captureHistory[0];
+  if (he && (he.livenessResult || he.ocrResult)) {
+    renderApiResultsRow(he.livenessResult, he.ocrResult);
+    if (he.ocrResult) renderOcrDetails(he.ocrResult);
+  }
+}
+function hideApiActions() {
+  apiActionsEl.style.display = 'none';
+}
+
+// ── ID R&D Liveness ────────────────────────────────────────────────────────
+async function checkLiveness() {
+  var blob = getFrontDocBlob();
+  if (!blob) { alert('No cropped front image available.'); return; }
+
+  livenessBtn.disabled = true;
+  livenessBtn.innerHTML = '<span class="api-spin"></span> Checking…';
+  apiResultsRow.style.display = 'none';
+
+  try {
+    var b64 = await blobToBase64(blob);
+    var resp = await fetch('https://idlivedoc-rest-api.idrnd.net/check_liveness', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': IDRND_API_KEY,
+      },
+      body: JSON.stringify({
+        image: b64,
+        pipelines: [
+          { pipeline_name: 'default-sr', calibration: 'REGULAR' },
+          { pipeline_name: 'default-pc', calibration: 'REGULAR' },
+          { pipeline_name: 'default-ps', calibration: 'REGULAR' },
+        ],
+      }),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ' + resp.statusText);
+    var data = await resp.json();
+    // Persist on latest history entry so it survives a re-render
+    if (captureHistory.length) captureHistory[0].livenessResult = data;
+    renderApiResultsRow(data, captureHistory[0] && captureHistory[0].ocrResult);
+    renderHistory();
+  } catch (err) {
+    apiResultsRow.style.display = 'flex';
+    apiResultsRow.innerHTML =
+      '<span style="color:#ff4757;font-size:11px;">⚠ Liveness error: ' + err.message + '</span>';
+  } finally {
+    livenessBtn.disabled = false;
+    livenessBtn.innerHTML = '🔍 Check Liveness';
+  }
+}
+
+// ── Microblink BlinkID OCR ─────────────────────────────────────────────────
+async function sendToOCR() {
+  if (!capturedSides.length) { alert('No capture available.'); return; }
+
+  ocrBtn.disabled = true;
+  ocrBtn.innerHTML = '<span class="api-spin"></span> Scanning…';
+
+  try {
+    var front     = capturedSides.find(function (cr) { return cr.sideIndex === 0; });
+    var back      = capturedSides.find(function (cr) { return cr.sideIndex === 1; });
+    var frontBlob = front ? (front.documentImage || front.image) : null;
+    var backBlob  = back  ? (back.documentImage  || back.image)  : null;
+    if (!frontBlob) throw new Error('No front image available');
+
+    var body = {
+      returnFullDocumentImage: false,
+      returnFaceImage:         false,
+      returnSignatureImage:    false,
+      imageFirstSide: { imageBase64: await blobToBase64(frontBlob) },
+    };
+    if (backBlob) {
+      body.imageSecondSide = { imageBase64: await blobToBase64(backBlob) };
+    }
+
+    var resp = await fetch('https://api.microblink.com/v1/recognizers/blinkid-multi-side', {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': MICROBLINK_AUTH,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ' + resp.statusText);
+    var data = await resp.json();
+
+    // Persist on history entry
+    if (captureHistory.length) captureHistory[0].ocrResult = data;
+    renderApiResultsRow(captureHistory[0] && captureHistory[0].livenessResult, data);
+    renderOcrDetails(data);
+    renderHistory();
+  } catch (err) {
+    ocrDetailsEl.style.display = 'block';
+    ocrDetailsEl.innerHTML =
+      '<div class="ocr-hdr">OCR Error</div>' +
+      '<div style="color:#ff4757;font-size:11px;">' + err.message + '</div>';
+  } finally {
+    ocrBtn.disabled = false;
+    ocrBtn.innerHTML = '📋 Send to OCR';
+  }
+}
+
+// ── API result renderers ───────────────────────────────────────────────────
+
+/** Render the one-line result row combining liveness and OCR summary. */
+function renderApiResultsRow(livenessData, ocrData) {
+  var html = '';
+
+  if (livenessData) {
+    var agg = livenessData.aggregate_liveness_probability;
+    var aggPct = typeof agg === 'number' ? (agg * 100).toFixed(1) + '%' : '–';
+    html += apiCell('Live (agg)', aggPct, typeof agg === 'number' ? (agg >= 0.5 ? 'green' : 'red') : '');
+
+    var pipeLabels = { 'default-sr': 'SR', 'default-pc': 'PC', 'default-ps': 'PS' };
+    if (livenessData.pipeline_results) {
+      livenessData.pipeline_results.forEach(function (pr) {
+        var lbl  = pipeLabels[pr.pipeline_name] || pr.pipeline_name;
+        var prob = pr.result && typeof pr.result.liveness_probability === 'number'
+          ? (pr.result.liveness_probability * 100).toFixed(1) + '%'
+          : (pr.result && pr.result.status_code) || '–';
+        var pass = pr.result && pr.result.liveness_probability >= 0.5;
+        html += apiCell(lbl, prob, pass ? 'green' : 'red');
+      });
+    }
+    var warn = livenessData.aggregate_image_quality_warnings;
+    if (warn && warn.length) {
+      html += apiCell('Warnings', warn.join(', '), 'amber');
+    }
+  }
+
+  if (ocrData) {
+    var r = ocrData.result || ocrData.recognizerResults || ocrData;
+    function sv(f) { return f && f.value ? f.value : (typeof f === 'string' ? f : null); }
+    var name = [sv(r.firstName), sv(r.lastName)].filter(Boolean).join(' ');
+    if (name) html += apiCell('Name', name, 'green');
+    var docNo = sv(r.documentNumber);
+    if (docNo) html += apiCell('Doc#', docNo, '');
+    var status = ocrData.executionStatus || ocrData.status;
+    if (status) html += apiCell('Status', status, status === 'VALID' ? 'green' : 'amber');
+  }
+
+  if (html) {
+    apiResultsRow.style.display = 'flex';
+    apiResultsRow.innerHTML = html;
+  }
+}
+
+function apiCell(label, value, colorCls) {
+  return '<div class="api-cell">' +
+    '<span class="api-cell-lbl">' + label + '</span>' +
+    '<span class="api-cell-val ' + (colorCls || '') + '">' + value + '</span>' +
+    '</div>';
+}
+
+/** Render the OCR field details panel. */
+function renderOcrDetails(data) {
+  var r = data.result || data.recognizerResults || data;
+  function sv(f) { return f && f.value ? String(f.value) : (typeof f === 'string' ? f : null); }
+
+  var pairs = [
+    ['First Name',    sv(r.firstName)],
+    ['Last Name',     sv(r.lastName)],
+    ['Full Name',     sv(r.fullName)],
+    ['Date of Birth', sv(r.dateOfBirth)],
+    ['Sex',           sv(r.sex)],
+    ['Nationality',   sv(r.nationality)],
+    ['Document No',   sv(r.documentNumber)],
+    ['Expiry',        sv(r.dateOfExpiry)],
+    ['Country',       sv(r.classInfo && r.classInfo.country)],
+    ['Doc Type',      sv(r.classInfo && r.classInfo.type)],
+    ['Address',       sv(r.address)],
+    ['MRZ',           sv(r.mrz && r.mrz.mrzText)],
+  ].filter(function (p) { return p[1]; });
+
+  var inner = '';
+  if (pairs.length) {
+    pairs.forEach(function (p) {
+      inner += '<span class="ocr-key">' + p[0] + '</span>' +
+               '<span class="ocr-val">' + p[1] + '</span>';
+    });
+    inner = '<div class="ocr-fields">' + inner + '</div>';
+  } else {
+    // Fallback: dump raw JSON if we can't parse known fields
+    inner = '<pre style="color:#aaa;font-size:10px;white-space:pre-wrap;overflow:auto;max-height:200px;">' +
+            JSON.stringify(data, null, 2).slice(0, 3000) + '</pre>';
+  }
+
+  ocrDetailsEl.style.display = 'block';
+  ocrDetailsEl.innerHTML = '<div class="ocr-hdr">📋 OCR Result</div>' + inner;
 }
 
 // ── Button handlers ────────────────────────────────────────────────────────
@@ -1312,12 +1677,17 @@ tabFull.addEventListener('click', () => {
   tabFull.classList.add('active'); tabDoc.classList.remove('active');
   const u = sideObjectUrls[activeSide];
   showResultImage(u && u.full);
+  hideApiActions();
 });
 tabDoc.addEventListener('click', () => {
   tabDoc.classList.add('active'); tabFull.classList.remove('active');
   const u = sideObjectUrls[activeSide];
   showResultImage(u && u.doc);
+  showApiActions();
 });
+
+livenessBtn.addEventListener('click', checkLiveness);
+ocrBtn.addEventListener('click',      sendToOCR);
 
 applyConfig.addEventListener('click', () => {
   startCapture(false);
