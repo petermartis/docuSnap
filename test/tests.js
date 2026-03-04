@@ -2,14 +2,14 @@
   run tests with: npm test
 */
 
-console.log("RUNNING JSCANIFY TESTS");
+console.log("RUNNING DOCUSNAP TESTS");
 console.log("Warning: This may take a bit");
 
 const { loadImage, createCanvas } = require("canvas");
 const { mkdirSync, writeFileSync, unlinkSync, existsSync, readdirSync } = require("fs");
 const assert = require("assert");
 
-const jscanify = require("../src/jscanify-node");
+const docuSnap = require("../src/docusnap-node");
 const path = require("path");
 
 
@@ -46,7 +46,7 @@ before(function (done) {
     console.log("=== beginning  tests ===");
     console.log("loading OpenCV.js...");
 
-    scanner = new jscanify();
+    scanner = new docuSnap();
     scanner.loadOpenCV(function (loadedCv) {
         cv = loadedCv;
 

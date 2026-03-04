@@ -1,4 +1,4 @@
-/*! jscanify Quality Assessment Module | MIT License */
+/*! docuSnap Quality Assessment Module | MIT License */
 
 (function (global, factory) {
   typeof exports === "object" && typeof module !== "undefined"
@@ -116,7 +116,7 @@
 
     /**
      * Analyzes document detection quality including size and aspect ratio.
-     * @param {Object} cornerPoints - Corner points from jscanify.getCornerPoints()
+     * @param {Object} cornerPoints - Corner points from docuSnap.getCornerPoints()
      * @param {number} frameWidth - Width of the source frame
      * @param {number} frameHeight - Height of the source frame
      * @returns {Object} Document detection quality analysis
@@ -181,7 +181,7 @@
     /**
      * Performs comprehensive quality assessment on an image with detected document.
      * @param {cv.Mat} img - Input image
-     * @param {Object} cornerPoints - Corner points from jscanify.getCornerPoints()
+     * @param {Object} cornerPoints - Corner points from docuSnap.getCornerPoints()
      * @returns {Object} Complete quality assessment result
      */
     assess(img, cornerPoints) {

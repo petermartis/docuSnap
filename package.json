@@ -1,14 +1,14 @@
 {
-  "name": "jscanify",
+  "name": "docusnap",
   "version": "2.0.0",
   "description": "Open-source Javascript document scanner with auto-capture and quality assessment.",
-  "main": "src/jscanify-node.js",
+  "main": "src/docusnap-node.js",
   "exports": {
     ".": {
-      "default": "./src/jscanify-node.js"
+      "default": "./src/docusnap-node.js"
     },
     "./client": {
-      "default": "./src/jscanify.js"
+      "default": "./src/docusnap.js"
     },
     "./quality": {
       "default": "./src/quality.js"
@@ -25,19 +25,19 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/puffinsoft/jscanify.git"
+    "url": "https://github.com/petermartis/docuSnap.git"
   },
   "keywords": [
     "js",
     "scanner",
     "document-scanner"
   ],
-  "author": "ColonelParrot",
+  "author": "petermartis",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/puffinsoft/jscanify/issues"
+    "url": "https://github.com/petermartis/docuSnap/issues"
   },
-  "homepage": "https://colonelparrot.github.io/jscanify/",
+  "homepage": "https://petermartis.github.io/docuSnap/",
   "dependencies": {
     "canvas": "^3.1.0",
     "jsdom": "^26.0.0"

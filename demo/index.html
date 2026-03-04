@@ -431,8 +431,11 @@
                 <label>Brightness Min (0-100)
                   <input type="number" id="cfgBrightnessMin" value="50" min="0" max="100">
                 </label>
-                <label>Glare Max (%)
-                  <input type="number" id="cfgGlare" value="2" min="0" max="100" step="0.5">
+                <label>Glare Max (0-100)
+                  <input type="number" id="cfgGlare" value="10" min="0" max="100" step="1">
+                </label>
+                <label>Glare Brightness Threshold (0-255)
+                  <input type="number" id="cfgGlareThreshold" value="248" min="200" max="255" step="1">
                 </label>
                 <label>Doc Size Min (%)
                   <input type="number" id="cfgDocSize" value="30" min="1" max="100">
@@ -455,8 +458,8 @@
     </div>
   </div>
 
-  <!-- Load jscanify (pure JS - no OpenCV needed!) -->
-  <script src="../src/jscanify.js"></script>
+  <!-- Load docuSnap (pure JS - no OpenCV needed!) -->
+  <script src="../src/docusnap.js"></script>
   
   <script>
     // Initialize when DOM is ready
@@ -496,6 +499,7 @@
         const cfgSharpness = document.getElementById('cfgSharpness');
         const cfgBrightnessMin = document.getElementById('cfgBrightnessMin');
         const cfgGlare = document.getElementById('cfgGlare');
+        const cfgGlareThreshold = document.getElementById('cfgGlareThreshold');
         const cfgDocSize = document.getElementById('cfgDocSize');
         const cfgCornerMargin = document.getElementById('cfgCornerMargin');
         const applyConfigBtn = document.getElementById('applyConfigBtn');
@@ -506,7 +510,8 @@
           sharpnessMin: (50 / 100) * 219,    // UI 50 -> raw ~110
           brightnessMin: (50 / 100) * 178,   // UI 50 -> raw ~89
           brightnessMax: 255,                 // No max limit
-          glareMax: 0.02,
+          glareMax: 0.10,                     // Fail if glare score > 10 (out of 100)
+          glareThreshold: 248,               // Pixel brightness threshold for glare (248 = near-white only)
           documentSizeMin: 0.15,              // Lowered from 0.30 for easier detection
           cornerMarginPx: 10,
         };
@@ -517,9 +522,18 @@
           statusEl.textContent = pass ? '✅' : '❌';
         }
         
+        // Detect capture capability (handles WebViews)
+        const capability = CaptureCapability.detect();
+        console.log('Capture capability:', capability);
+        
+        if (capability === 'none') {
+          alert('Camera capture is not supported on this device/browser.');
+        }
+        
         // Create scanner instance and initialize
-        const scanner = new jscanify();
+        const scanner = new docuSnap();
         await scanner.init();
+        scanner._detector.debug = true;  // ← dump rejection counts every frame
         console.log('Scanner initialized');
         
         // Create auto-capture with new API
@@ -585,7 +599,7 @@
               brightnessNorm, c.brightness.pass, v => v.toFixed(0));
             
             updateIndicator(indGlare, indGlareStatus,
-              c.glare.value * 100, c.glare.pass, v => v.toFixed(1) + '%');
+              Math.min(100, Math.round(c.glare.value * 100)), c.glare.pass, v => v.toFixed(0));
             
             updateIndicator(indDocSize, indDocSizeStatus,
               c.documentSize.value * 100, c.documentSize.pass, v => v.toFixed(0) + '%');
@@ -606,7 +620,8 @@
             sharpnessMin: (sharpnessNorm / 100) * 219,        // 0-100 -> 0-219 raw
             brightnessMin: (brightnessMinNorm / 100) * 178,   // 0-100 -> 0-178 raw
             brightnessMax: 255,                                // No max limit
-            glareMax: (parseFloat(cfgGlare.value) || 2) / 100,
+            glareMax: (parseFloat(cfgGlare.value) || 10) / 100,
+            glareThreshold: parseFloat(cfgGlareThreshold.value) || 248,
             documentSizeMin: (parseFloat(cfgDocSize.value) || 30) / 100,
             cornerMarginPx: parseFloat(cfgCornerMargin.value) || 10,
           };
@@ -615,8 +630,42 @@
           alert('Settings applied!');
         });
         
-        // Button handlers
+        // Fallback capture for WebViews (uses file input with native camera)
+        let fallbackCapture = null;
+        if (capability === 'file') {
+          // Hide video container, show fallback UI
+          document.querySelector('.video-container').innerHTML = '<div id="fallbackContainer" style="padding: 20px; text-align: center;"></div>';
+          fallbackCapture = new DocumentCaptureFallback({
+            scanner: scanner,
+            containerElement: document.getElementById('fallbackContainer'),
+            thresholds: currentThresholds,
+            allowSkipQuality: true,
+            onCapture: (captureResult) => {
+              const img = new Image();
+              img.onload = () => {
+                result.innerHTML = '';
+                result.appendChild(img);
+                img.style.maxWidth = '100%';
+                img.style.borderRadius = '4px';
+              };
+              img.src = captureResult.extractedData || captureResult.imageData;
+              result.style.boxShadow = '0 0 30px #2ed573';
+              setTimeout(() => result.style.boxShadow = 'none', 500);
+            },
+            onQualityReport: (report) => {
+              console.log('Fallback quality:', report);
+            },
+          });
+          fallbackCapture.start();
+          startBtn.style.display = 'none';
+          stopBtn.style.display = 'none';
+          captureBtn.style.display = 'none';
+        }
+        
+        // Button handlers (only for 'auto' mode with getUserMedia)
         startBtn.addEventListener('click', async () => {
+          if (capability !== 'auto') return;
+          
           try {
             // Request camera
             const stream = await navigator.mediaDevices.getUserMedia({

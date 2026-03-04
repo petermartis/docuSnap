@@ -1,4 +1,4 @@
-/*! jscanify v1.4.0 | (c) ColonelParrot and other contributors | MIT License */
+/*! docuSnap v1.4.0 | (c) ColonelParrot and other contributors | MIT License */
 
 const { Canvas, createCanvas, Image, ImageData } = require("canvas");
 const { JSDOM } = require("jsdom");
@@ -25,7 +25,7 @@ function distance(p1, p2) {
   return Math.hypot(p1.x - p2.x, p1.y - p2.y);
 }
 
-class jscanify {
+class docuSnap {
   constructor() {
     installDOM();
   }
@@ -265,4 +265,4 @@ class jscanify {
   }
 }
 
-module.exports = jscanify;
+module.exports = docuSnap;

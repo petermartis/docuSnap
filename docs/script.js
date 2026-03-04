@@ -20,7 +20,7 @@ function loadOpenCV(onComplete) {
     }
 }
 
-const scanner = new jscanify()
+const scanner = new docuSnap()
 $('#demo-images .image-container').click(function () {
     $('.image-container.selected').removeClass('selected')
     $(this).addClass('selected')

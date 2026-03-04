@@ -1,4 +1,4 @@
-/*! jscanify ML Document Detector | MIT License */
+/*! docuSnap ML Document Detector | MIT License */
 
 /**
  * ML-based document detection using ONNX Runtime Web

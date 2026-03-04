@@ -1,4 +1,4 @@
-/*! jscanify Document Auto Capture | MIT License */
+/*! docuSnap Document Auto Capture | MIT License */
 
 (function (global, factory) {
   typeof exports === "object" && typeof module !== "undefined"
@@ -45,14 +45,14 @@
   /**
    * DocumentAutoCapture - Automatic document capture with quality assessment
    * 
-   * Integrates jscanify for document detection and QualityAssessment for
+   * Integrates docuSnap for document detection and QualityAssessment for
    * image quality validation to automatically capture documents when
    * quality criteria are met.
    */
   class DocumentAutoCapture {
     /**
      * Create a DocumentAutoCapture instance
-     * @param {jscanify} scanner - jscanify instance
+     * @param {docuSnap} scanner - docuSnap instance
      * @param {QualityAssessment} qualityAssessment - QualityAssessment instance
      * @param {Object} config - Configuration options
      */

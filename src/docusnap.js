@@ -1,4 +1,4 @@
-/*! jscanify v2.1.0 | (c) ColonelParrot and other contributors | MIT License */
+/*! docuSnap v2.1.0 | (c) ColonelParrot and other contributors | MIT License */
 
 (function (global, factory) {
   if (typeof exports === "object" && typeof module !== "undefined") {
@@ -11,7 +11,7 @@
           : typeof self !== "undefined" ? self
           : typeof window !== "undefined" ? window
           : global;
-    g.jscanify = exported.jscanify;
+    g.docuSnap = exported.docuSnap;
     g.DocumentAutoCapture = exported.DocumentAutoCapture;
     g.DocumentCaptureFallback = exported.DocumentCaptureFallback;
     g.SmartDocumentCapture = exported.SmartDocumentCapture;
@@ -234,6 +234,22 @@
   };
 
   /**
+   * Coast: predict-only step with no measurement update.
+   * Advances position by last known velocity without correcting toward any measurement.
+   * Use this when the detector misses a frame so the box drifts smoothly rather than freezing or disappearing.
+   * @returns {number} Predicted position
+   */
+  KalmanFilter1D.prototype.coast = function() {
+    this.x = this.x + this.v;
+    var P00 = this.P00 + this.P01 + this.P10 + this.P11 + this.Q;
+    var P01 = this.P01 + this.P11;
+    var P10 = this.P10 + this.P11;
+    var P11 = this.P11 + this.Q;
+    this.P00 = P00; this.P01 = P01; this.P10 = P10; this.P11 = P11;
+    return this.x;
+  };
+
+  /**
    * Reset filter to a new initial value.
    * @param {number} value - New initial position
    */
@@ -332,10 +348,12 @@
 
     // 5. Hough line transform on edge pixels
     var lines = this._houghLines(edges, pw, ph);
-    if (lines.length < 4) return null;
+    if (this.debug) console.log('[docuSnap] lines found:', lines.length, lines.slice(0,8).map(function(l){ return {theta: Math.round(l.theta*180/Math.PI)+'°', rho: Math.round(l.rho), votes: l.votes}; }));
+    if (lines.length < 4) { if (this.debug) console.warn('[docuSnap] KILLED: fewer than 4 lines'); return null; }
 
     // 6. Find rectangle from line intersections (pass edges for support scoring)
     var best = this._findRectangleFromLines(lines, pw, ph, scale, edges);
+    if (this.debug && !best) console.warn('[docuSnap] KILLED: no valid quad found (see individual rejections above)');
 
     return best;
   };
@@ -599,28 +617,32 @@
     var frameArea = pw * ph;
     var DEG = Math.PI / 180;
 
-    // Classify lines into ~horizontal and ~vertical
+    // Classify lines into ~horizontal and ~vertical.
+    // Boundary at exactly 45° / 135° with no gap so documents rotated up to
+    // ±45° from landscape always have their edges classified into one bucket.
     var hLines = [];
     var vLines = [];
 
     for (var i = 0; i < lines.length; i++) {
       var angleDeg = lines[i].theta * 180 / Math.PI;
-      // Wider angle tolerance for tilted cards
-      if (angleDeg > 50 && angleDeg < 130) {
+      if (angleDeg > 45 && angleDeg < 135) {
         hLines.push(lines[i]);
-      } else if (angleDeg < 40 || angleDeg > 140) {
+      } else {
         vLines.push(lines[i]);
       }
     }
 
-    if (hLines.length < 2 || vLines.length < 2) return null;
+    if (this.debug) console.log('[docuSnap] hLines:', hLines.length, 'vLines:', vLines.length);
+    if (hLines.length < 2 || vLines.length < 2) { if (this.debug) console.warn('[docuSnap] KILLED: not enough h/v lines'); return null; }
+    var _dbg = this.debug;
+    var _rej = { hAngle:0, hVP:0, hDist:0, vAngle:0, vVP:0, vDist:0, corners:0, size:0, edgeRatio:0, aspect:0, docSize:0, convex:0, diag:0, angles:0, rotation:0, symmetry:0, edgeSupport:0 };
 
     // Limit search to top candidates
     if (hLines.length > 8) hLines = hLines.slice(0, 8);
     if (vLines.length > 8) vLines = vLines.slice(0, 8);
 
-    // Ideal card aspect ratio (ISO ID-1: 85.6mm × 53.98mm = 1.586)
-    var idealAspect = 1.586;
+    // Known document aspect ratios: ID-1 credit card (1.586), ID-3 passport (1.417)
+    var knownAspects = [1.586, 1.417];
 
     var bestResult = null;
     var bestScore = -1;
@@ -629,26 +651,38 @@
       for (var hj = hi + 1; hj < hLines.length; hj++) {
         var h1 = hLines[hi], h2 = hLines[hj];
 
-        // Parallel check: angle diff < 5°
+        // Perspective-aware check: allow up to 20° for top/bottom edges.
+        // When lines aren't parallel, validate their vanishing point is outside
+        // the frame so convergence is physically plausible (not two random lines).
         var hAngleDiff = Math.abs(h1.theta - h2.theta);
-        if (hAngleDiff > 5 * DEG) continue;
+        if (hAngleDiff > 20 * DEG) { _rej.hAngle++; continue; }
+        if (hAngleDiff > 3 * DEG) {
+          var hVP = self._lineIntersection(h1, h2);
+          if (!hVP || (hVP.x > -0.5*pw && hVP.x < 1.5*pw && hVP.y > -0.5*ph && hVP.y < 1.5*ph)) { _rej.hVP++; continue; }
+        }
 
         // Reasonable separation
         var hDist = Math.abs(h1.rho - h2.rho);
-        if (hDist < ph * 0.1 || hDist > ph * 0.95) continue;
+        if (hDist < ph * 0.1 || hDist > ph * 0.95) { _rej.hDist++; continue; }
 
         for (var vi = 0; vi < vLines.length - 1; vi++) {
           for (var vj = vi + 1; vj < vLines.length; vj++) {
             var v1 = vLines[vi], v2 = vLines[vj];
 
-            // Parallel check: angle diff < 5°
+            // Perspective-aware check: left/right edges converge for any camera tilt.
+            // topW/botW = 0.9 → vAngleDiff ≈ 11°; topW/botW = 0.7 → ≈ 28°.
+            // Allow up to 25° and validate VP is outside the frame.
             var vAngleDiff = Math.abs(v1.theta - v2.theta);
             if (vAngleDiff > Math.PI / 2) vAngleDiff = Math.PI - vAngleDiff;
-            if (vAngleDiff > 5 * DEG) continue;
+            if (vAngleDiff > 25 * DEG) { _rej.vAngle++; continue; }
+            if (vAngleDiff > 3 * DEG) {
+              var vVP = self._lineIntersection(v1, v2);
+              if (!vVP || (vVP.x > -0.5*pw && vVP.x < 1.5*pw && vVP.y > -0.5*ph && vVP.y < 1.5*ph)) { _rej.vVP++; continue; }
+            }
 
             // Reasonable separation
             var vDist = Math.abs(v1.rho - v2.rho);
-            if (vDist < pw * 0.1 || vDist > pw * 0.95) continue;
+            if (vDist < pw * 0.1 || vDist > pw * 0.95) { _rej.vDist++; continue; }
 
             // Compute 4 corners
             var corners = [
@@ -668,7 +702,7 @@
                 break;
               }
             }
-            if (!allInFrame) continue;
+            if (!allInFrame) { _rej.corners++; continue; }
 
             // Sort corners: TL, TR, BR, BL
             var sorted = self._sortCorners(corners);
@@ -684,23 +718,23 @@
 
             var avgW = (topW + botW) / 2;
             var avgH = (leftH + rightH) / 2;
-            if (avgW < 5 || avgH < 5) continue;
+            if (avgW < 5 || avgH < 5) { _rej.size++; continue; }
 
             // Opposite sides similar
             var widthRatio = Math.min(topW, botW) / Math.max(topW, botW);
             var heightRatio = Math.min(leftH, rightH) / Math.max(leftH, rightH);
-            if (widthRatio < 0.6 || heightRatio < 0.6) continue;
+            if (widthRatio < 0.6 || heightRatio < 0.6) { _rej.edgeRatio++; continue; }
 
             // Aspect ratio - document must be landscape (wider than tall)
             // and match credit card (1.586) or passport (1.42) aspect ratios
             var aspect = avgW / avgH;  // < 1.0 for portrait = rejected
-            if (aspect < self._minAspect || aspect > self._maxAspect) continue;
+            if (aspect < self._minAspect || aspect > self._maxAspect) { _rej.aspect++; continue; }
 
             // Size checks
             var quadArea = self._quadArea(sorted);
             var areaFrac = quadArea / frameArea;
             var widthFrac = avgW / pw;  // Width-based doc size
-            if (widthFrac < self._minWidthFraction || areaFrac > self._maxAreaFraction) continue;
+            if (widthFrac < self._minWidthFraction || areaFrac > self._maxAreaFraction) { _rej.docSize++; continue; }
 
             // --- HOMOGRAPHY-BASED QUALITY CHECK ---
             // Instead of fragile angle-based patterns, use geometric quality metrics
@@ -717,13 +751,13 @@
                           (sorted[0].y - sorted[3].y) * (sorted[1].x - sorted[0].x);
             var allPositive = cross01 > 0 && cross12 > 0 && cross23 > 0 && cross30 > 0;
             var allNegative = cross01 < 0 && cross12 < 0 && cross23 < 0 && cross30 < 0;
-            if (!allPositive && !allNegative) continue;  // Not convex
+            if (!allPositive && !allNegative) { _rej.convex++; continue; }
             
             // 2. Diagonal ratio check: diagonals should be similar length (not too skewed)
             var diag1 = Math.hypot(sorted[2].x - sorted[0].x, sorted[2].y - sorted[0].y);  // TL to BR
             var diag2 = Math.hypot(sorted[3].x - sorted[1].x, sorted[3].y - sorted[1].y);  // TR to BL
             var diagRatio = Math.min(diag1, diag2) / Math.max(diag1, diag2);
-            if (diagRatio < 0.5) continue;  // Diagonals too different = heavily skewed
+            if (diagRatio < 0.5) { _rej.diag++; continue; }
             
             // 3. Corner angle sanity check (very loose - just reject extreme distortion)
             var minAngle = 45, maxAngle = 135;  // Much more permissive than before
@@ -742,7 +776,7 @@
               var aDeg = Math.acos(Math.max(-1, Math.min(1, cosA))) * 180 / Math.PI;
               if (aDeg < minAngle || aDeg > maxAngle) { anglesOk = false; break; }
             }
-            if (!anglesOk) continue;
+            if (!anglesOk) { _rej.angles++; continue; }
 
             // --- ROTATION CHECK ---
             // Document must be roughly horizontal (within +/- 30 degrees)
@@ -750,8 +784,19 @@
             var topDy = sorted[1].y - sorted[0].y;  // TR.y - TL.y
             var rotationRad = Math.atan2(topDy, topDx);
             var rotationDeg = Math.abs(rotationRad * 180 / Math.PI);
-            // Allow +/- 30 degrees from horizontal (0°) or if document is upside down (180°)
-            if (rotationDeg > 30 && rotationDeg < 150) continue;
+            // Allow +/- 45 degrees from horizontal (0°) or if document is upside down (180°)
+            if (rotationDeg > 45 && rotationDeg < 135) { _rej.rotation++; continue; }
+
+            // --- TRAPEZOID SYMMETRY CHECK ---
+            // For perspective distortion of a flat document the midpoints of the top
+            // and bottom edges must be roughly aligned horizontally (camera is roughly
+            // above the document centre). A parallelogram-like asymmetry indicates
+            // arbitrary skew that is NOT a perspective projection of a flat surface.
+            var topMidX = (sorted[0].x + sorted[1].x) / 2;
+            var botMidX = (sorted[3].x + sorted[2].x) / 2;
+            var midXAlignFrac = Math.abs(topMidX - botMidX) / pw;
+            if (midXAlignFrac > 0.20) { _rej.symmetry++; continue; }
+            var symmetryScore = 1.0 - (midXAlignFrac / 0.20);
 
             // --- EDGE SUPPORT SCORING ---
             // Sample along each side of the rectangle and check what fraction
@@ -760,16 +805,16 @@
             // (e.g., fingers/hands/background).
             var edgeSupport = self._measureEdgeSupport(sorted, edges, pw, ph);
 
-            // Require at least 15% average edge support across all 4 sides (lowered for debugging)
-            if (edgeSupport < 0.15) continue;
+            if (edgeSupport < 0.15) { _rej.edgeSupport++; continue; }
 
             // Rectangularity
             var rectArea = avgW * avgH;
             var rectangularity = Math.min(quadArea / rectArea, 1.0);
 
-            // Aspect ratio closeness to ideal card (1.586)
-            // Score 1.0 when exact match, lower when further away
-            var aspectScore = 1.0 - Math.min(Math.abs(aspect - idealAspect) / idealAspect, 0.5);
+            // Aspect ratio closeness to nearest known document type
+            // Score 1.0 when exact match to any known type, lower when further away
+            var minAspectDist = Math.min.apply(null, knownAspects.map(function(a) { return Math.abs(aspect - a); }));
+            var aspectScore = 1.0 - Math.min(minAspectDist / 0.2, 0.5);
 
             // --- CENTER BIAS ---
             // Prefer rectangles whose center is near the frame center
@@ -782,13 +827,13 @@
             var maxDist = Math.hypot(pw / 2, ph / 2);  // Corner to center distance
             var centerScore = 1.0 - (centerDist / maxDist);  // 1.0 = perfectly centered
 
-            // Final score: Edge support is key, area filtered by doc size threshold
-            // - Edge support ensures we follow real document edges
-            // - Aspect ratio validates it's a card/passport shape
-            // - Prefer tighter (smaller) rectangles to avoid extending over hands/background
-            // - Prefer rectangles centered in frame
-            var tightness = 1.0 - areaFrac;  // Smaller area = higher tightness
-            var score = edgeSupport * 0.40 + aspectScore * 0.30 + tightness * 0.15 + centerScore * 0.15;
+            // Final score — core weights as designed:
+            // rectangularity and symmetry act as hard filters above; they don't dilute the score.
+            var tightness = 1.0 - areaFrac;
+            var score = edgeSupport * 0.40
+                      + aspectScore * 0.30
+                      + tightness   * 0.15
+                      + centerScore * 0.15;
 
             if (score > bestScore) {
               bestScore = score;
@@ -815,6 +860,7 @@
       }
     }
 
+    if (_dbg) console.log('[docuSnap] rejection counts:', _rej, '| best score:', bestResult ? Math.round((bestResult.confidence||0)*100)+'%' : 'none');
     return bestResult;
   };
 
@@ -834,8 +880,8 @@
    */
   DocumentDetector.prototype._measureEdgeSupport = function (corners, edges, w, h) {
     var tolerance = 5;   // pixels — how far from the line to look for edges
-    var minSupportRequired = 0.30;  // Further reduced for debugging
-    var maxGapFraction = 0.35;  // Allow larger gaps from fingers
+    var minSupportRequired = 0.15;  // If any single side < 15%, return that (not avg)
+    var maxGapFraction = 0.40;  // Allow gaps from rounded corners / fingers
 
     // 4 sides: TL→TR, TR→BR, BR→BL, BL→TL
     var sides = [
@@ -1029,7 +1075,7 @@
   };
 
   // =========================================================================
-  // jscanify — main class
+  // docuSnap — main class
   // =========================================================================
 
   /**
@@ -1040,7 +1086,7 @@
   }
 
   /**
-   * Main jscanify class — document detection and quality assessment.
+   * Main docuSnap class — document detection and quality assessment.
    *
    * v2.1.0: Pure JS rectangle detector with aspect ratio filtering.
    * No ML model or external dependencies needed.
@@ -1051,7 +1097,7 @@
    * @param {number} [options.minWidthFraction=0.40] - min document width as fraction of frame width
    * @param {string|ArrayBuffer} [options.modelUrl] - (deprecated, ignored)
    */
-  class jscanify {
+  class docuSnap {
     constructor(options) {
       options = options || {};
       this._quality = new QualityAssessor();
@@ -1491,7 +1537,10 @@
       var sharpnessMin = thresholds.sharpnessMin !== undefined ? thresholds.sharpnessMin : 100;
       var brightnessMin = thresholds.brightnessMin !== undefined ? thresholds.brightnessMin : 40;
       var brightnessMax = thresholds.brightnessMax !== undefined ? thresholds.brightnessMax : 220;
-      var glareMax = thresholds.glareMax !== undefined ? thresholds.glareMax : 0.02;
+      var glareMax = thresholds.glareMax !== undefined ? thresholds.glareMax : 0.10;
+      // Pixel brightness threshold for glare detection (0-255).
+      // 248 = only catch near-white hotspots; white card background (~230-247) is not flagged.
+      var glareThreshold = thresholds.glareThreshold !== undefined ? thresholds.glareThreshold : 248;
       var documentSizeMin = thresholds.documentSizeMin !== undefined ? thresholds.documentSizeMin : 0.15;
       var cornerMarginPx = thresholds.cornerMarginPx !== undefined ? thresholds.cornerMarginPx : 10;
 
@@ -1501,7 +1550,7 @@
       var sharpness = this._quality.measureSharpness(gray, w, h);
       var brightness = this._quality.measureBrightness(gray, w, h);
       // Measure glare within document bounds for accuracy (falls back to whole frame if no corners)
-      var glare = this._quality.detectGlareInRegion(gray, w, h, cornerPoints);
+      var glare = this._quality.detectGlareInRegion(gray, w, h, cornerPoints, glareThreshold);
 
       var completeness = { allCornersFound: false, allWithinMargin: false, details: {} };
       var documentSize = 0;
@@ -1561,7 +1610,7 @@
    * quality-gated document photo acquisition using rectangle detection.
    *
    * @param {object} options
-   * @param {jscanify} options.scanner - an initialized jscanify instance
+   * @param {docuSnap} options.scanner - an initialized docuSnap instance
    * @param {HTMLVideoElement} options.videoElement
    * @param {HTMLCanvasElement} [options.canvasElement]
    * @param {object} [options.thresholds]
@@ -1597,7 +1646,7 @@
       this._stableCorners = null;        // Ground truth corners (validated)
       this._displayCorners = null;       // Currently displayed corners (smoothed)
       this._cornerRejectCount = 0;       // Frames rejecting stable corners
-      this._confirmFramesNeeded = 5;     // Frames needed to confirm/reject
+      this._confirmFramesNeeded = 20;    // ~2s of missed frames before clearing the box
       
       // Kalman filter state for each corner (x, y independently)
       // State: [position, velocity], we track 8 values (4 corners x 2 coords)
@@ -1657,7 +1706,7 @@
           self._evaluateFrame().then(function () {
             self._evaluating = false;
           }).catch(function (err) {
-            console.error("jscanify: frame evaluation error:", err);
+            console.error("docuSnap: frame evaluation error:", err);
             self._evaluating = false;
           });
         }
@@ -1775,9 +1824,18 @@
         });
 
         // Extract with perspective correction and 25% margin
-        // Use standard ID card dimensions (85.6mm x 53.98mm = ~1.586 aspect ratio)
-        var docWidth = 856;  // 10x actual mm for good resolution
-        var docHeight = 540;
+        // Compute output dimensions from the detected document's actual aspect ratio
+        // so passports (1.42) and credit cards (1.586) are both rendered without distortion
+        var cp = best.cornerPoints;
+        var _topW  = Math.hypot(cp.topRightCorner.x  - cp.topLeftCorner.x,  cp.topRightCorner.y  - cp.topLeftCorner.y);
+        var _botW  = Math.hypot(cp.bottomRightCorner.x - cp.bottomLeftCorner.x, cp.bottomRightCorner.y - cp.bottomLeftCorner.y);
+        var _lefH  = Math.hypot(cp.bottomLeftCorner.x  - cp.topLeftCorner.x,  cp.bottomLeftCorner.y  - cp.topLeftCorner.y);
+        var _rigH  = Math.hypot(cp.bottomRightCorner.x - cp.topRightCorner.x, cp.bottomRightCorner.y - cp.topRightCorner.y);
+        var _avgW  = (_topW + _botW) / 2;
+        var _avgH  = (_lefH + _rigH) / 2;
+        var _longSide = 856; // fix the longer side to 856px for consistent resolution
+        var docWidth  = _avgW >= _avgH ? _longSide : Math.round(_longSide * _avgW / _avgH);
+        var docHeight = _avgW >= _avgH ? Math.round(_longSide * _avgH / _avgW) : _longSide;
         var extracted = await self._scanner.extractPaper(
           img, docWidth, docHeight, best.cornerPoints, { margin: 0.25 }
         );
@@ -1786,7 +1844,7 @@
           extractedDataUrl = extracted.toDataURL("image/jpeg", 0.95);
         }
       } catch (e) {
-        console.error("jscanify: extraction error:", e);
+        console.error("docuSnap: extraction error:", e);
       }
 
       this._onStateChange(State.CAPTURED, "Document captured");
@@ -1843,7 +1901,23 @@
       // No detection this frame
       if (!newCorners) {
         this._cornerRejectCount++;
-        // Clear after 5 frames without detection
+
+        // While we still have filters, coast (predict-only) so the box drifts
+        // smoothly on last known velocity rather than freezing or jumping.
+        // For a stationary document velocity ≈ 0 so the box stays put.
+        if (this._kalmanFilters && this._displayCorners) {
+          var cornerKeys = ['topLeftCorner', 'topRightCorner', 'bottomLeftCorner', 'bottomRightCorner'];
+          var coasted = {};
+          for (var i = 0; i < cornerKeys.length; i++) {
+            coasted[cornerKeys[i]] = {
+              x: this._kalmanFilters[i * 2].coast(),
+              y: this._kalmanFilters[i * 2 + 1].coast(),
+            };
+          }
+          this._displayCorners = coasted;
+        }
+
+        // Only clear after ~2s of continuous missed frames
         if (this._cornerRejectCount >= this._confirmFramesNeeded) {
           this._stableCorners = null;
           this._displayCorners = null;
@@ -1917,6 +1991,51 @@
     }
 
     /**
+     * @private - Draw a rounded polygon path (counter-clockwise for hole)
+     * @param {CanvasRenderingContext2D} ctx
+     * @param {Array} corners - Array of {x, y} points in order
+     * @param {number} radius - Corner radius in pixels
+     */
+    _drawRoundedPolygon(ctx, corners, radius) {
+      var n = corners.length;
+      if (n < 3) return;
+      
+      for (var i = 0; i < n; i++) {
+        var curr = corners[i];
+        var next = corners[(i + 1) % n];
+        var prev = corners[(i + n - 1) % n];
+        
+        // Vectors from current corner to neighbors
+        var toPrev = { x: prev.x - curr.x, y: prev.y - curr.y };
+        var toNext = { x: next.x - curr.x, y: next.y - curr.y };
+        
+        // Normalize vectors
+        var lenPrev = Math.hypot(toPrev.x, toPrev.y);
+        var lenNext = Math.hypot(toNext.x, toNext.y);
+        if (lenPrev < 1 || lenNext < 1) continue;
+        
+        toPrev.x /= lenPrev; toPrev.y /= lenPrev;
+        toNext.x /= lenNext; toNext.y /= lenNext;
+        
+        // Limit radius to half the shortest edge
+        var maxR = Math.min(lenPrev, lenNext) / 2;
+        var r = Math.min(radius, maxR);
+        
+        // Points where arc starts and ends
+        var arcStart = { x: curr.x + toPrev.x * r, y: curr.y + toPrev.y * r };
+        var arcEnd = { x: curr.x + toNext.x * r, y: curr.y + toNext.y * r };
+        
+        if (i === 0) {
+          ctx.moveTo(arcStart.x, arcStart.y);
+        } else {
+          ctx.lineTo(arcStart.x, arcStart.y);
+        }
+        ctx.arcTo(curr.x, curr.y, arcEnd.x, arcEnd.y, r);
+      }
+      ctx.closePath();
+    }
+
+    /**
      * @private - Draw spotlight effect: dim outside document, highlight inside
      * Uses canvas clipping to create inverse mask effect
      */
@@ -1936,6 +2055,10 @@
         this._currentTransparency = Math.max(targetOpacity, this._currentTransparency - this._transparencyStep);
       }
       
+      // Corner radius (scales with document size)
+      var docWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+      var cornerRadius = Math.max(10, docWidth * 0.035);  // 3.5% of width, min 10px
+      
       // Draw dark overlay on everything EXCEPT document area
       // Use evenodd fill rule: outer rect + inner polygon = inverse mask
       ctx.save();
@@ -1946,12 +2069,8 @@
       ctx.lineTo(frameW, frameH);
       ctx.lineTo(0, frameH);
       ctx.closePath();
-      // Inner document polygon (counter-clockwise for hole)
-      ctx.moveTo(tl.x, tl.y);
-      ctx.lineTo(bl.x, bl.y);
-      ctx.lineTo(br.x, br.y);
-      ctx.lineTo(tr.x, tr.y);
-      ctx.closePath();
+      // Inner document polygon with rounded corners (counter-clockwise for hole)
+      this._drawRoundedPolygon(ctx, [tl, bl, br, tr], cornerRadius);
       ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
       ctx.fill('evenodd');
       ctx.restore();
@@ -1961,11 +2080,7 @@
       var alpha = this._currentTransparency / 100;
       ctx.fillStyle = 'rgba(255, 255, 255, ' + alpha + ')';
       ctx.beginPath();
-      ctx.moveTo(tl.x, tl.y);
-      ctx.lineTo(tr.x, tr.y);
-      ctx.lineTo(br.x, br.y);
-      ctx.lineTo(bl.x, bl.y);
-      ctx.closePath();
+      this._drawRoundedPolygon(ctx, [tl, tr, br, bl], cornerRadius);
       ctx.fill();
     }
   }
@@ -2046,17 +2161,17 @@
 
       this._captureBtn = document.createElement("button");
       this._captureBtn.textContent = "Take Photo of Document";
-      this._captureBtn.className = "jscanify-fallback-btn";
+      this._captureBtn.className = "docusnap-fallback-btn";
       this._captureBtn.addEventListener("click", function () {
         self._fileInput.click();
       });
 
       this._statusEl = document.createElement("div");
-      this._statusEl.className = "jscanify-fallback-status";
+      this._statusEl.className = "docusnap-fallback-status";
       this._previewEl = document.createElement("div");
-      this._previewEl.className = "jscanify-fallback-preview";
+      this._previewEl.className = "docusnap-fallback-preview";
       this._actionsEl = document.createElement("div");
-      this._actionsEl.className = "jscanify-fallback-actions";
+      this._actionsEl.className = "docusnap-fallback-actions";
 
       this._container.appendChild(this._fileInput);
       this._container.appendChild(this._captureBtn);
@@ -2128,8 +2243,33 @@
       if (report.allPassed) {
         this._statusEl.textContent = "Quality check passed";
         this._captureBtn.style.display = "none";
+        
+        // Extract perspective-corrected document if corners detected
+        var extractedDataUrl = null;
+        if (cornerPoints) {
+          try {
+            var cp = cornerPoints;
+            var _topW = Math.hypot(cp.topRightCorner.x - cp.topLeftCorner.x, cp.topRightCorner.y - cp.topLeftCorner.y);
+            var _botW = Math.hypot(cp.bottomRightCorner.x - cp.bottomLeftCorner.x, cp.bottomRightCorner.y - cp.bottomLeftCorner.y);
+            var _lefH = Math.hypot(cp.bottomLeftCorner.x - cp.topLeftCorner.x, cp.bottomLeftCorner.y - cp.topLeftCorner.y);
+            var _rigH = Math.hypot(cp.bottomRightCorner.x - cp.topRightCorner.x, cp.bottomRightCorner.y - cp.topRightCorner.y);
+            var _avgW = (_topW + _botW) / 2;
+            var _avgH = (_lefH + _rigH) / 2;
+            var _longSide = 856;
+            var docWidth = _avgW >= _avgH ? _longSide : Math.round(_longSide * _avgW / _avgH);
+            var docHeight = _avgW >= _avgH ? Math.round(_longSide * _avgH / _avgW) : _longSide;
+            var extracted = this._scanner.extractPaper(imageEl, docWidth, docHeight, cornerPoints, { margin: 0.25 });
+            if (extracted) {
+              extractedDataUrl = extracted.toDataURL("image/jpeg", 0.95);
+            }
+          } catch (e) {
+            console.error("docuSnap fallback: extraction error:", e);
+          }
+        }
+        
         this._onCapture({
           imageData: imageDataUrl,
+          extractedData: extractedDataUrl,
           cornerPoints: cornerPoints,
           qualityReport: report,
         });
@@ -2148,7 +2288,7 @@
 
         var retryBtn = document.createElement("button");
         retryBtn.textContent = "Retake Photo";
-        retryBtn.className = "jscanify-fallback-btn";
+        retryBtn.className = "docusnap-fallback-btn";
         retryBtn.addEventListener("click", function () {
           self._reset();
           self._fileInput.click();
@@ -2158,7 +2298,7 @@
         if (this._allowSkip) {
           var skipBtn = document.createElement("button");
           skipBtn.textContent = "Use Anyway";
-          skipBtn.className = "jscanify-fallback-btn jscanify-fallback-btn-secondary";
+          skipBtn.className = "docusnap-fallback-btn docusnap-fallback-btn-secondary";
           skipBtn.addEventListener("click", function () {
             self._captureBtn.style.display = "none";
             self._actionsEl.innerHTML = "";
@@ -2224,7 +2364,7 @@
   }
 
   return {
-    jscanify: jscanify,
+    docuSnap: docuSnap,
     DocumentAutoCapture: DocumentAutoCapture,
     DocumentCaptureFallback: DocumentCaptureFallback,
     SmartDocumentCapture: SmartDocumentCapture,
