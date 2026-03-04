@@ -3196,7 +3196,7 @@
       return {
         sharpnessMin:    ((q.sharpness  != null ? q.sharpness  : 40) / 100) * 219,
         brightnessMin:   ((q.brightness != null ? q.brightness : 40) / 100) * 178,
-        glareMax:        (q.glare          != null ? q.glare          : 10)  / 100,
+        glareMax:        (q.glare          != null ? q.glare          : 18)  / 100,
         glareThreshold:   q.glareThreshold != null ? q.glareThreshold : 225,
         documentSizeMin: (q.size  != null ? q.size  : 40) / 100,
         cornerMarginPx:  10,

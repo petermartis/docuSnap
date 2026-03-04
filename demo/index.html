@@ -557,7 +557,7 @@
           <input type="number" id="cfgBrightness" value="40" min="0" max="100">
         </label>
         <label>Glare Max (0-100)
-          <input type="number" id="cfgGlare"      value="10" min="0" max="100">
+          <input type="number" id="cfgGlare"      value="18" min="0" max="100">
         </label>
         <label>Doc Size Min (0-100)
           <input type="number" id="cfgDocSize"    value="40" min="0" max="100">
@@ -671,7 +671,7 @@ function buildConfig() {
   const q = {
     sharpness:  nv('cfgSharpness',  40),
     brightness: nv('cfgBrightness', 40),
-    glare:      nv('cfgGlare',      10),
+    glare:      nv('cfgGlare',      18),
     size:       nv('cfgDocSize',    40),
   };
 
@@ -696,6 +696,8 @@ async function startCapture(forceFile) {
   activeSide = 0;
   revokeCapturedUrls();
   resetResultPanel();
+  // Reset throttled display state so a fresh session starts clean
+  _dispCode = null; _dispHint = ''; _dispEscalated = false; _dispSince = 0;
 
   const cfg = buildConfig();
 
@@ -776,51 +778,83 @@ function showFallbackMode() {
   captureBtn.style.display = 'none';
 }
 
+// ── Instruction-code throttle ──────────────────────────────────────────────
+// Actionable failure codes (REDUCE_GLARE, MOVE_CLOSER, etc.) can flicker
+// several times per second as scores hover around the threshold.
+// We hold each message for at least INSTRUCTION_MIN_MS before switching to a
+// different one.  State transitions (SEARCHING / CONFIRMED / HOLD_STILL) are
+// always applied immediately — they represent real workflow phase changes.
+const INSTRUCTION_MIN_MS = 1000;
+const INSTANT_CODES = new Set(['SEARCHING', 'CONFIRMED', 'HOLD_STILL']);
+let _dispCode      = null;   // instruction code currently shown
+let _dispHint      = '';     // hint text currently shown
+let _dispEscalated = false;  // hintEscalated flag for the shown hint
+let _dispSince     = 0;      // performance.now() when _dispCode was last set
+
+function resolveDisplayCode(frame) {
+  const code = frame.instructionCode;
+  if (code === _dispCode) return;  // nothing changed — keep current
+  // Update immediately for privileged state transitions; throttle between
+  // failure codes to avoid distracting rapid text changes.
+  const instant = INSTANT_CODES.has(code) || INSTANT_CODES.has(_dispCode);
+  if (instant || (performance.now() - _dispSince) >= INSTRUCTION_MIN_MS) {
+    _dispCode      = code;
+    _dispHint      = frame.hint;
+    _dispEscalated = frame.hintEscalated;
+    _dispSince     = performance.now();
+  }
+}
+
 // ── Frame handler ──────────────────────────────────────────────────────────
 function handleFrame(frame) {
   const IC = DocuSnap.InstructionCode;
 
+  // Resolve which instruction code/hint to display (throttled for failures).
+  resolveDisplayCode(frame);
+
   // ── Document detection state ─────────────────────────────────────────────
   // Quality metrics are only meaningful once a document has been located.
   // While searching, dim the grid and show a neutral "looking" message.
+  // Use the raw frame code here so the grid dimming tracks reality, not the
+  // throttled display — ensures indicators snap back to live data immediately.
   const searching = (frame.instructionCode === IC.SEARCHING);
 
   qualityGrid.classList.toggle('inactive', searching);
 
-  // Instruction banner (overlay on video)
+  // Instruction banner (overlay on video) — uses throttled code/hint
   if (banner.style.display !== 'none') {
-    banner.textContent   = frame.hint;
+    banner.textContent   = _dispHint;
     banner.style.display = '';
     banner.className =
-      frame.instructionCode === 'CONFIRMED'  ? 'good'
-    : frame.instructionCode === 'HOLD_STILL' ? 'good'
-    : frame.hintEscalated ? 'escalated' : '';
+      _dispCode === 'CONFIRMED'  ? 'good'
+    : _dispCode === 'HOLD_STILL' ? 'good'
+    : _dispEscalated ? 'escalated' : '';
   }
 
-  // Score / state line
-  if (searching) {
+  // Score / state line — uses throttled code
+  if (_dispCode === IC.SEARCHING) {
     scoreEl.textContent = 'LOOKING FOR DOCUMENT';
     scoreEl.className   = 'qp-score';
     scoreEl.style.color = '#ff4757';
-  } else if (frame.instructionCode === IC.CONFIRMED || frame.instructionCode === IC.HOLD_STILL) {
-    scoreEl.textContent = frame.instructionCode === IC.HOLD_STILL ? '✅ Hold still…' : '✅ Ready';
+  } else if (_dispCode === IC.CONFIRMED || _dispCode === IC.HOLD_STILL) {
+    scoreEl.textContent = _dispCode === IC.HOLD_STILL ? '✅ Hold still…' : '✅ Ready';
     scoreEl.className   = 'qp-score';
     scoreEl.style.color = '#2ed573';
   } else {
     const IC_LABELS = { SHARPEN: 'TOO BLURRY' };
-    scoreEl.textContent = IC_LABELS[frame.instructionCode] || frame.instructionCode.replace(/_/g, ' ');
+    scoreEl.textContent = IC_LABELS[_dispCode] || (_dispCode || '').replace(/_/g, ' ');
     scoreEl.className   = 'qp-score';
     scoreEl.style.color = '#ff4757';
   }
 
-  // Hint box (hide while searching — no document-specific guidance yet)
+  // Hint box — uses throttled hint/escalated flag
   if (searching) {
     hintBox.style.display = 'none';
   } else {
-    const isGood = (frame.instructionCode === IC.CONFIRMED || frame.instructionCode === IC.HOLD_STILL);
+    const isGood = (_dispCode === IC.CONFIRMED || _dispCode === IC.HOLD_STILL);
     hintBox.style.display = '';
-    hintBox.textContent   = frame.hint;
-    hintBox.className     = isGood ? 'good' : (frame.hintEscalated ? '' : 'neutral');
+    hintBox.textContent   = _dispHint;
+    hintBox.className     = isGood ? 'good' : (_dispEscalated ? '' : 'neutral');
   }
 
   // Quality indicators — only update values when document is detected
