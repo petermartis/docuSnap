@@ -159,7 +159,9 @@ Calling `nextSide()` when already on the last side is a safe no-op.
 
 Pause the live-stream detection loop. The video stream itself continues; only the frame-processing and capture-triggering are suspended. `onFrame` will stop firing until `resume()` is called.
 
-Has no effect when in file mode or when the current state is already `'captured'`.
+> **Automatic pause:** The library calls the equivalent of `pause()` automatically when `isLastSide === true` is delivered to `onCapture`. You do not need to call `pause()` yourself in the happy-path completion flow. Call `snap.reset()` or `snap.resume()` to restart scanning.
+
+Safe to call from within an `onCapture` handler or any other state. Has no effect when already paused or destroyed.
 
 ---
 
@@ -267,7 +269,7 @@ Received by the `onCapture` callback each time a side is successfully captured.
 | `corners` | [`CornerPoints`](#cornerpoints)` \| null` | Document corner coordinates at capture time. `null` when corners were not found. |
 | `sideIndex` | `number` | Zero-based index of the captured side (`0` = front, `1` = back). |
 | `sidesTotal` | `number` | Total number of sides configured. |
-| `isLastSide` | `boolean` | `true` when this capture completes the final configured side. When `false`, call `snap.nextSide()` after presenting the intermediate result. |
+| `isLastSide` | `boolean` | `true` when this capture completes the final configured side. The library automatically pauses the detection loop at this point. When `false`, call `snap.nextSide()` after presenting the intermediate result. |
 | `captureMode` | `string` | How this capture was triggered: `'auto'`, `'manual'`, or `'file'`. |
 | `timestamp` | `Date` | Wall-clock time when the capture occurred. |
 

@@ -3132,13 +3132,24 @@
       this._buildCaptureResult(rawResult, 'auto').then(function (cr) {
         self._capturedSides.push(cr);
         self._onCapture(cr);
-        // Auto-resume the detection loop after 2 s so the preview doesn't freeze
-        setTimeout(function () {
-          if (self._autoCapture && self._scanState === 'captured') {
-            self._autoCapture.reset();
-            self._scanState = 'ready';
-          }
-        }, 2000);
+
+        if (cr.isLastSide) {
+          // All sides captured — automatically stop the detection loop.
+          // The caller does not need to do anything extra for the happy path.
+          // Call snap.resume() or snap.reset() to start a new scan session.
+          if (self._autoCapture) { self._autoCapture.stop(); }
+          self._scanState = 'paused';
+        } else {
+          // More sides to scan — auto-resume the preview loop after 2 s so
+          // the canvas doesn't freeze while the caller reviews the capture
+          // and decides when to call snap.nextSide().
+          setTimeout(function () {
+            if (self._autoCapture && self._scanState === 'captured') {
+              self._autoCapture.reset();
+              self._scanState = 'ready';
+            }
+          }, 2000);
+        }
       }).catch(function (err) {
         self._onError({ code: 'CAPTURE_ERROR', message: err.message, cause: err });
       });
@@ -3150,6 +3161,9 @@
       this._buildCaptureResult(rawResult, 'file').then(function (cr) {
         self._capturedSides.push(cr);
         self._onCapture(cr);
+        if (cr.isLastSide) {
+          self._scanState = 'paused';
+        }
       }).catch(function (err) {
         self._onError({ code: 'CAPTURE_ERROR', message: err.message, cause: err });
       });

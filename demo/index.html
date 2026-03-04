@@ -1043,9 +1043,9 @@ function handleCapture(cr) {
   result.style.boxShadow = '0 0 30px #2ed573';
   setTimeout(function () { result.style.boxShadow = 'none'; }, 500);
 
-  // Pause the detection loop once all sides are done — the API guarantees
-  // pause() is safe to call from an onCapture handler (any non-idle state).
-  if (cr.isLastSide) snap.pause();
+  // The library automatically pauses when isLastSide === true — no extra call
+  // needed here. Re-enable Start so the user can kick off a fresh session.
+  if (cr.isLastSide) startBtn.disabled = false;
 
   console.log('[demo] Capture:', {
     sideIndex: cr.sideIndex, isLastSide: cr.isLastSide,
