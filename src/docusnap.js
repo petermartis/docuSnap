@@ -277,7 +277,7 @@
     // Aspect ratio for ID cards (1.586) and passports (1.42) with ~20% tolerance
     this._minAspect = options.minAspectRatio != null ? options.minAspectRatio : 1.2;
     this._maxAspect = options.maxAspectRatio != null ? options.maxAspectRatio : 1.8;
-    this._minWidthFraction = options.minWidthFraction != null ? options.minWidthFraction : 0.25;  // 25% minimum (lowered for debugging)
+    this._minWidthFraction = options.minWidthFraction != null ? options.minWidthFraction : 0.35;  // 35% minimum — card must span at least a third of frame width
     this._maxAreaFraction = options.maxAreaFraction != null ? options.maxAreaFraction : 0.85;
     this._processWidth = options.processWidth || 480;  // Higher res for better edge detection
     // Pre-compute Hough sin/cos tables
@@ -634,8 +634,8 @@
     var _rej = { hAngle:0, hVP:0, hDist:0, vAngle:0, vVP:0, vDist:0, corners:0, size:0, edgeRatio:0, aspect:0, docSize:0, convex:0, diag:0, angles:0, rotation:0, symmetry:0, edgeSupport:0 };
 
     // Limit search to top candidates
-    if (hLines.length > 8) hLines = hLines.slice(0, 8);
-    if (vLines.length > 8) vLines = vLines.slice(0, 8);
+    if (hLines.length > 10) hLines = hLines.slice(0, 10);
+    if (vLines.length > 10) vLines = vLines.slice(0, 10);
 
     // Known document aspect ratios: ID-1 credit card (1.586), ID-3 passport (1.417)
     var knownAspects = [1.586, 1.417];
@@ -730,7 +730,7 @@
             var quadArea = self._quadArea(sorted);
             var areaFrac = quadArea / frameArea;
             var widthFrac = avgW / pw;  // Width-based doc size
-            if (widthFrac < self._minWidthFraction || areaFrac > self._maxAreaFraction) { _rej.docSize++; continue; }
+            if (widthFrac < self._minWidthFraction || areaFrac < 0.08 || areaFrac > self._maxAreaFraction) { _rej.docSize++; continue; }
 
             // --- HOMOGRAPHY-BASED QUALITY CHECK ---
             // Instead of fragile angle-based patterns, use geometric quality metrics
@@ -825,10 +825,12 @@
 
             // Final score — core weights as designed:
             // rectangularity and symmetry act as hard filters above; they don't dilute the score.
-            var tightness = 1.0 - areaFrac;
+            // areaScore rewards larger documents (peaks at ~45% of frame area = typical held-card fill).
+            // Old tightness (1 - areaFrac) was backwards: it rewarded small blobs over full cards.
+            var areaScore = Math.min(areaFrac / 0.45, 1.0);
             var score = edgeSupport * 0.40
-                      + aspectScore * 0.30
-                      + tightness   * 0.15
+                      + aspectScore * 0.25
+                      + areaScore   * 0.20
                       + centerScore * 0.15;
 
             if (score > bestScore) {
