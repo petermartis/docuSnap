@@ -160,10 +160,23 @@
       padding: 5px 8px;
       border-radius: 4px;
       font-size: 12px;
+      transition: opacity 0.3s;
     }
     .ind-label  { flex: 1; color: #888; font-size: 11px; }
     .ind-value  { width: 46px; text-align: right; font-family: monospace; color: #fff; font-size: 11px; }
     .ind-status { margin-left: 5px; font-size: 11px; line-height: 1; }
+
+    /* ── Inactive state: document not yet detected ── */
+    /* Dims all indicators; score shows search message */
+    .quality-grid.inactive .indicator {
+      opacity: 0.3;
+      pointer-events: none;
+    }
+    .qp-score.searching {
+      color: #666 !important;
+      font-size: 13px;
+      font-style: italic;
+    }
 
     /* ─────────────────── Hint box ─────────────────── */
     #hintBox {
@@ -571,6 +584,7 @@ const faceRow             = document.getElementById('faceIndicatorRow');
 const indFace             = document.getElementById('indFace');
 const indFaceStatus       = document.getElementById('indFaceStatus');
 
+const qualityGrid    = document.querySelector('.quality-grid');
 const startBtn       = document.getElementById('startBtn');
 const stopBtn        = document.getElementById('stopBtn');
 const captureBtn     = document.getElementById('captureBtn');
@@ -706,6 +720,16 @@ function showFallbackMode() {
 
 // ── Frame handler ──────────────────────────────────────────────────────────
 function handleFrame(frame) {
+  const IC = DocuSnap.InstructionCode;
+
+  // ── Document detection state ─────────────────────────────────────────────
+  // Quality metrics are only meaningful once a document has been located.
+  // While searching, dim the grid and show a neutral "looking" message.
+  const searching = (frame.instructionCode === IC.SEARCHING);
+
+  qualityGrid.classList.toggle('inactive', searching);
+
+  // Instruction banner (overlay on video)
   if (banner.style.display !== 'none') {
     banner.textContent   = frame.hint;
     banner.style.display = '';
@@ -715,32 +739,46 @@ function handleFrame(frame) {
     : frame.hintEscalated ? 'escalated' : '';
   }
 
-  const IC = DocuSnap.InstructionCode;
-  if (frame.instructionCode === IC.CONFIRMED || frame.instructionCode === IC.HOLD_STILL) {
+  // Score / state line
+  if (searching) {
+    scoreEl.textContent = '🔍 Looking for document…';
+    scoreEl.className   = 'qp-score searching';
+  } else if (frame.instructionCode === IC.CONFIRMED || frame.instructionCode === IC.HOLD_STILL) {
     scoreEl.textContent = frame.instructionCode === IC.HOLD_STILL ? '✅ Hold still…' : '✅ Ready';
+    scoreEl.className   = 'qp-score';
     scoreEl.style.color = '#2ed573';
   } else {
     const IC_LABELS = { SHARPEN: 'TOO BLURRY' };
     scoreEl.textContent = IC_LABELS[frame.instructionCode] || frame.instructionCode.replace(/_/g, ' ');
+    scoreEl.className   = 'qp-score';
     scoreEl.style.color = '#ff4757';
   }
 
-  const isGood = (frame.instructionCode === IC.CONFIRMED || frame.instructionCode === IC.HOLD_STILL);
-  hintBox.style.display = '';
-  hintBox.textContent   = frame.hint;
-  hintBox.className     = isGood ? 'good' : (frame.hintEscalated ? '' : 'neutral');
+  // Hint box (hide while searching — no document-specific guidance yet)
+  if (searching) {
+    hintBox.style.display = 'none';
+  } else {
+    const isGood = (frame.instructionCode === IC.CONFIRMED || frame.instructionCode === IC.HOLD_STILL);
+    hintBox.style.display = '';
+    hintBox.textContent   = frame.hint;
+    hintBox.className     = isGood ? 'good' : (frame.hintEscalated ? '' : 'neutral');
+  }
 
-  const q = frame.quality;
-  setIndicator(indSharpness,  indSharpnessStatus,  q.sharpness,  !q.failing.includes('sharpness'),  '%');
-  setIndicator(indBrightness, indBrightnessStatus, q.brightness, !q.failing.includes('brightness'), '%');
-  setIndicator(indGlare,      indGlareStatus,      q.glare,      !q.failing.includes('glare'),      '%');
-  setIndicator(indDocSize,    indDocSizeStatus,     q.size,       !q.failing.includes('size'),       '%');
+  // Quality indicators — only update values when document is detected
+  if (!searching) {
+    const q = frame.quality;
+    setIndicator(indSharpness,  indSharpnessStatus,  q.sharpness,  !q.failing.includes('sharpness'),  '%');
+    setIndicator(indBrightness, indBrightnessStatus, q.brightness, !q.failing.includes('brightness'), '%');
+    setIndicator(indGlare,      indGlareStatus,      q.glare,      !q.failing.includes('glare'),      '%');
+    setIndicator(indDocSize,    indDocSizeStatus,     q.size,       !q.failing.includes('size'),       '%');
+  }
 
+  // Face detection row
   if (frame.face !== null && frame.face !== undefined) {
     const requireFace = document.getElementById('cfgFace').value === 'require';
     faceRow.style.display   = '';
     faceBadge.style.display = '';
-    if (frame.face.present === null) {
+    if (frame.face.present === null || searching) {
       indFace.textContent       = '–';
       indFaceStatus.textContent = '⚪';
       faceBadge.textContent     = '👤 –';
