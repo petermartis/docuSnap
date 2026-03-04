@@ -1724,12 +1724,20 @@
      */
     capture() {
       if (this._state === State.IDLE || this._state === State.CAPTURED) return;
-      // Ensure at least one candidate exists — use full-res corners (not display-space)
+      // Ensure at least one candidate exists — snapshot current video frame
       if (this._candidates.length === 0) {
+        var video = this._video;
+        var vw = video.videoWidth;
+        var vh = video.videoHeight;
+        var manCanvas = document.createElement('canvas');
+        manCanvas.width  = vw;
+        manCanvas.height = vh;
+        manCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
         this._candidates.push({
           sharpness:   0,
           fullCorners: this._stableFullCorners || null,
           report:      null,
+          canvas:      manCanvas,
         });
       }
       this._selectBestFrame();
@@ -1885,7 +1893,7 @@
      * │   – overlay corners scaled up from detection space                 │
      * │   – dimensions set once on first valid frame, not every frame     │
      * ├─────────────────────────────────────────────────────────────────────┤
-     * │ CAPTURE    (fresh full-res grab at _selectBestFrame time)          │
+     * │ CAPTURE    (best buffered full-res frame — corners + pixels matched) │
      * │   – corners scaled back to full video resolution for extraction    │
      * │   – high-quality JPEG from actual camera pixel count              │
      * └─────────────────────────────────────────────────────────────────────┘
@@ -1957,17 +1965,28 @@
       this._lastDispH  = dispH;
       this._lastReport = report;
 
-      // ── Rolling frame buffer — always push passing frames ────────────
+      // ── Rolling frame buffer — snapshot passing frames at full resolution ─
       if (report.allPassed) {
+        // Reclaim canvas from oldest entry if buffer is full; otherwise create new
+        var frameCanvas;
+        if (this._frameBuffer.length >= this._frameBufferSize) {
+          frameCanvas = this._frameBuffer.shift().canvas;
+        } else {
+          frameCanvas = document.createElement('canvas');
+        }
+        if (frameCanvas.width !== vw || frameCanvas.height !== vh) {
+          frameCanvas.width  = vw;
+          frameCanvas.height = vh;
+        }
+        frameCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
+
         this._frameBuffer.push({
           sharpness:   report.checks.sharpness.value,
           fullCorners: fullCorners,
           report:      report,
           timestamp:   performance.now(),
+          canvas:      frameCanvas,
         });
-        while (this._frameBuffer.length > this._frameBufferSize) {
-          this._frameBuffer.shift();
-        }
       }
 
       // ── State machine ──────────────────────────────────────────────────
@@ -2001,10 +2020,15 @@
           this._candidates = [];
           this._onStateChange(State.DETECTING, "Position document in frame");
         } else {
+          var ssCanvas = document.createElement('canvas');
+          ssCanvas.width  = vw;
+          ssCanvas.height = vh;
+          ssCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
           this._candidates.push({
             sharpness:   report.checks.sharpness.value,
             fullCorners: fullCorners,
             report:      report,
+            canvas:      ssCanvas,
           });
         }
       }
@@ -2027,24 +2051,28 @@
     async _selectBestFrame() {
       this._state = State.CAPTURED;
 
-      // Pick sharpest candidate
+      // Pick the best candidate using a composite quality score:
+      // sharpness (40%), edge-support confidence (30%), brightness (15%), low glare (15%)
+      function _candidateScore(c) {
+        if (!c.report || !c.report.checks) return c.sharpness || 0;
+        var ch = c.report.checks;
+        var sharp = ch.sharpness  ? ch.sharpness.value  / 219 : 0;  // normalize to 0-1
+        var conf  = ch.confidence ? ch.confidence.value       : 0;  // already 0-1
+        var bright = ch.brightness ? ch.brightness.value / 178 : 0; // normalize to 0-1
+        var glare = ch.glare      ? (1 - ch.glare.value)     : 1;  // invert: less glare = better
+        return sharp * 0.40 + conf * 0.30 + bright * 0.15 + glare * 0.15;
+      }
       var best = this._candidates[0];
+      var bestScore = _candidateScore(best);
       for (var i = 1; i < this._candidates.length; i++) {
-        if (this._candidates[i].sharpness > best.sharpness) best = this._candidates[i];
+        var s = _candidateScore(this._candidates[i]);
+        if (s > bestScore) { best = this._candidates[i]; bestScore = s; }
       }
 
-      var video = this._video;
-      var vw    = video.videoWidth;
-      var vh    = video.videoHeight;
-
-      // ── Grab one full-resolution frame from the live video ────────────
-      // (candidates no longer store a JPEG per frame — saves memory and per-frame cost)
-      var captureCanvas = document.createElement("canvas");
-      captureCanvas.width  = vw;
-      captureCanvas.height = vh;
-      captureCanvas.getContext("2d").drawImage(video, 0, 0);
-      var capturedImageData = captureCanvas.toDataURL("image/jpeg", 0.95);
-      captureCanvas = null; // allow GC
+      // ── Use the actual buffered frame (corners + pixels are from the same instant) ──
+      var capturedImageData = best.canvas.toDataURL("image/jpeg", 0.95);
+      var vw = best.canvas.width;
+      var vh = best.canvas.height;
 
       // ── Perspective-correct extraction ────────────────────────────────
       // Decode the JPEG back to an <img> so that extractPaper always receives
