@@ -21,7 +21,8 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "mocha --trace-uncaught"
+    "test":  "mocha --trace-uncaught",
+    "proxy": "node demo/proxy.js"
   },
   "repository": {
     "type": "git",

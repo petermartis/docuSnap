@@ -735,6 +735,12 @@
         <label>Doc Size Min (0-100)
           <input type="number" id="cfgDocSize"    value="40" min="0" max="100">
         </label>
+        <label style="grid-column:1/-1">Liveness Proxy URL
+          <input type="text" id="cfgLivenessProxy"
+                 placeholder="http://localhost:3001  (run: npm run proxy)"
+                 style="width:100%;margin-top:4px;background:#0d0d1a;border:1px solid #333;
+                        border-radius:6px;color:#fff;padding:5px 8px;font-size:12px;">
+        </label>
       </div>
       <button id="applyConfigBtn" class="config-btn">Apply &amp; Restart</button>
     </details>
@@ -1482,18 +1488,28 @@ async function checkLiveness() {
   var blob = getFrontDocBlob();
   if (!blob) { alert('No cropped front image available.'); return; }
 
+  // The ID R&D API is server-side only (no CORS). Require a proxy URL.
+  var proxyUrl = (document.getElementById('cfgLivenessProxy') || {}).value;
+  proxyUrl = proxyUrl ? proxyUrl.trim().replace(/\/$/, '') : '';
+  if (!proxyUrl) {
+    apiResultsRow.style.display = 'flex';
+    apiResultsRow.innerHTML =
+      '<span style="color:#ffa502;font-size:11px;">ℹ Liveness requires a proxy — ' +
+      'run <code style="background:#111;padding:1px 4px;border-radius:3px;">npm run proxy</code> ' +
+      'then set the URL in ⚙ Settings.</span>';
+    return;
+  }
+
   livenessBtn.disabled = true;
   livenessBtn.innerHTML = '<span class="api-spin"></span> Checking…';
   apiResultsRow.style.display = 'none';
 
   try {
     var b64 = await blobToBase64(blob);
-    var resp = await fetch('https://idlivedoc-rest-api.idrnd.net/check_liveness', {
+    // POST to the local proxy — it adds the x-api-key and forwards to ID R&D.
+    var resp = await fetch(proxyUrl + '/check_liveness', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': IDRND_API_KEY,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         image: b64,
         pipelines: [
@@ -1511,10 +1527,8 @@ async function checkLiveness() {
     renderHistory();
   } catch (err) {
     var livMsg = err.message;
-    // "Failed to fetch" is the browser's CORS/network error — give a helpful hint.
     if (err instanceof TypeError && livMsg === 'Failed to fetch') {
-      livMsg = 'CORS blocked — the ID R&amp;D API must be called server-side. ' +
-               'Configure a backend proxy that forwards requests to idlivedoc-rest-api.idrnd.net.';
+      livMsg = 'Could not reach proxy at ' + proxyUrl + ' — is it running?';
     }
     apiResultsRow.style.display = 'flex';
     apiResultsRow.innerHTML =
