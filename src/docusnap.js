@@ -1946,9 +1946,20 @@
           var _rigH  = Math.hypot(cp.bottomRightCorner.x - cp.topRightCorner.x, cp.bottomRightCorner.y - cp.topRightCorner.y);
           var _avgW  = (_topW + _botW) / 2;
           var _avgH  = (_lefH + _rigH) / 2;
-          var _longSide = 1920;
-          var docWidth  = _avgW >= _avgH ? _longSide : Math.round(_longSide * _avgW / _avgH);
-          var docHeight = _avgW >= _avgH ? Math.round(_longSide * _avgH / _avgW) : _longSide;
+          // Use the actual native pixel dimensions of the detected document —
+          // never upscale; upscaling adds no real information and hurts OCR.
+          // Only downscale if the natural size exceeds the 4K cap recommended
+          // by Microblink (3840px on the long side).
+          var _MAX_LONG  = 3840;
+          var _natLong   = Math.max(_avgW, _avgH);
+          var _ds        = _natLong > _MAX_LONG ? _MAX_LONG / _natLong : 1.0;
+          var docWidth   = Math.round(_avgW * _ds);
+          var docHeight  = Math.round(_avgH * _ds);
+          if (_natLong < 1920) {
+            console.warn('[DocuSnap] Document long side is ' + Math.round(_natLong) +
+              'px — below the 1920px minimum recommended by Microblink / ID R&D.' +
+              ' Use a higher-resolution camera for best OCR / liveness results.');
+          }
           var extracted = await self._scanner.extractPaper(img, docWidth, docHeight, cp, { margin: 0.25 });
           if (extracted) extractedDataUrl = extracted.toDataURL("image/jpeg", 0.95);
         }
@@ -2499,9 +2510,16 @@
               var _rigH = Math.hypot(cp.bottomRightCorner.x - cp.topRightCorner.x,   cp.bottomRightCorner.y - cp.topRightCorner.y);
               var _avgW = (_topW + _botW) / 2;
               var _avgH = (_lefH + _rigH) / 2;
-              var _longSide = 1920;
-              var docWidth  = _avgW >= _avgH ? _longSide : Math.round(_longSide * _avgW / _avgH);
-              var docHeight = _avgW >= _avgH ? Math.round(_longSide * _avgH / _avgW) : _longSide;
+              // Native resolution — no upscaling; 4K cap per Microblink guidelines.
+              var _MAX_LONG = 3840;
+              var _natLong  = Math.max(_avgW, _avgH);
+              var _ds       = _natLong > _MAX_LONG ? _MAX_LONG / _natLong : 1.0;
+              var docWidth  = Math.round(_avgW * _ds);
+              var docHeight = Math.round(_avgH * _ds);
+              if (_natLong < 1920) {
+                console.warn('[DocuSnap] Document long side is ' + Math.round(_natLong) +
+                  'px — below 1920px minimum recommended for OCR / liveness.');
+              }
               // imageSource (full-res ImageBitmap or HTMLImageElement) is used here
               var extracted = this._scanner.extractPaper(imageSource, docWidth, docHeight, fullCorners, { margin: 0.25 });
               if (extracted) extractedDataUrl = extracted.toDataURL("image/jpeg", 0.95);
