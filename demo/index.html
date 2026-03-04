@@ -133,37 +133,37 @@
       align-items: center;
       justify-content: center;
       gap: 0;
-      margin-top: 8px;
-      padding: 8px 16px;
+      margin-top: 10px;
+      padding: 14px 24px;
       background: #0f0f23;
-      border-radius: 6px;
+      border-radius: 10px;
     }
     .step-item {
       display: flex;
       align-items: center;
-      gap: 5px;
+      gap: 10px;
     }
     .step-dot {
-      width: 9px; height: 9px;
+      width: 18px; height: 18px;
       border-radius: 50%;
-      border: 2px solid #555;
+      border: 3px solid #555;
       background: transparent;
       flex-shrink: 0;
       transition: background 0.3s, border-color 0.3s;
     }
-    .step-dot.active { border-color: #00d9ff; background: #00d9ff; box-shadow: 0 0 6px #00d9ff88; }
+    .step-dot.active { border-color: #00d9ff; background: #00d9ff; box-shadow: 0 0 10px #00d9ff88; }
     .step-dot.done   { border-color: #2ed573; background: #2ed573; }
     .step-lbl {
-      font-size: 11px; font-weight: 700; color: #555;
-      text-transform: uppercase; letter-spacing: 0.05em;
+      font-size: 22px; font-weight: 700; color: #555;
+      text-transform: uppercase; letter-spacing: 0.06em;
       transition: color 0.3s;
     }
     .step-lbl.active { color: #00d9ff; }
     .step-lbl.done   { color: #2ed573; }
     .step-connector {
-      width: 40px; height: 2px;
+      width: 80px; height: 3px;
       background: #333;
-      margin: 0 8px;
+      margin: 0 14px;
       flex-shrink: 0;
       transition: background 0.3s;
     }
@@ -242,8 +242,8 @@
       text-align: center;
       margin-bottom: 6px;
     }
-    .qp-label { display: block; color: #888; font-size: 11px; }
-    .qp-score { display: block; font-size: 16px; font-weight: bold; }
+    .qp-label { display: block; color: #888; font-size: 14px; }
+    .qp-score { display: block; font-size: 16px; font-weight: bold; margin-top: 6px; }
 
     /* auto-fit grid: all items on one row when space allows, wraps on narrow screens */
     .quality-grid {
@@ -445,6 +445,22 @@
       min-height: 80px;
       color: #444; font-size: 11px;
     }
+    /* Paired thumbnails for 2-side captures */
+    .history-img-pair {
+      display: flex; gap: 2px;
+    }
+    .history-side {
+      flex: 1; min-width: 0; position: relative;
+    }
+    .history-side img {
+      display: block; width: 100%; height: auto;
+    }
+    .history-side-lbl {
+      position: absolute; bottom: 2px; left: 0; right: 0;
+      text-align: center; font-size: 9px; color: #aaa;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      background: rgba(0,0,0,0.5); padding: 1px 0;
+    }
 
     /* On wide screens, constrain image column to ~55 % */
     @media (min-width: 520px) {
@@ -465,10 +481,11 @@
     .hbadge {
       font-size: 10px; padding: 2px 6px;
       border-radius: 3px; background: #0f0f23; white-space: nowrap;
+      color: #888;
     }
-    .hbadge.pass    { color: #2ed573; }
-    .hbadge.fail    { color: #ff4757; }
-    .hbadge.neutral { color: #aaa;    }
+    .hbadge .hb-val       { color: #2ed573; }
+    .hbadge.fail .hb-val  { color: #ff4757; }
+    .hbadge.neutral .hb-val { color: #aaa; }
 
     /* ─────────────────── External API actions ─────────────────── */
     #apiActions {
@@ -495,22 +512,23 @@
     .api-btn-liveness { background: #9b59b6; color: #fff; }
     .api-btn-ocr      { background: #2980b9; color: #fff; }
 
-    /* One-line API result row */
+    /* One-line API result row — same grid as quality indicators */
     #apiResultsRow {
       display: none;
-      flex-wrap: wrap;
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
       gap: 4px;
-      padding: 6px 2px;
+      padding: 6px 0;
       border-top: 1px solid #1e2a4a;
     }
     .api-cell {
-      display: flex; flex-direction: column;
+      display: flex; align-items: center;
       background: #0f0f23;
-      padding: 4px 8px; border-radius: 4px;
-      min-width: 56px;
+      padding: 5px 8px; border-radius: 4px;
+      font-size: 12px;
     }
-    .api-cell-lbl { color: #555; font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; }
-    .api-cell-val { color: #fff; font-family: monospace; font-size: 11px; }
+    .api-cell-lbl { flex: 1; color: #888; font-size: 11px; }
+    .api-cell-val { width: 52px; text-align: right; font-family: monospace; color: #fff; font-size: 11px; }
+    .api-cell-status { margin-left: 5px; font-size: 11px; line-height: 1; }
     .api-cell-val.green { color: #2ed573; }
     .api-cell-val.red   { color: #ff4757; }
     .api-cell-val.amber { color: #ffa502; }
@@ -644,8 +662,8 @@
 
     <!-- ══ Controls — always directly beneath video ══ -->
     <div class="controls">
-      <button id="startBtn">▶ Start Camera</button>
-      <button id="stopBtn"    disabled>⏹ Stop</button>
+      <button id="startBtn">▶ Start Detection</button>
+      <button id="stopBtn"    disabled>⏹ Stop Detection</button>
       <!-- captureBtn: hidden by default; only shown in Manual mode -->
       <button id="captureBtn" disabled>📸 Capture</button>
     </div>
@@ -695,11 +713,10 @@
       <summary>⚙️ Settings</summary>
       <div class="config-grid">
         <label>Doc Type
-          <select id="cfgDocType">
+          <select id="cfgDocType" onchange="onDocTypeChange()">
             <option value="any">Any</option>
-            <option value="id">ID Card</option>
-            <option value="passport">Passport</option>
-            <option value="document">Document (A4)</option>
+            <option value="id">ID / Passport</option>
+            <option value="document">Document (Letter/A4)</option>
           </select>
         </label>
         <label>Capture Mode
@@ -742,6 +759,43 @@
                  style="width:100%;margin-top:4px;background:#0d0d1a;border:1px solid #333;
                         border-radius:6px;color:#fff;padding:5px 8px;font-size:12px;">
         </label>
+      </div>
+      <div style="margin-top:12px;border-top:1px solid #333;padding-top:10px;">
+        <div style="font-size:12px;color:#aaa;margin-bottom:8px;">Instruction Messages</div>
+        <div class="config-grid">
+          <label>SEARCHING
+            <input type="text" id="msg_SEARCHING" value="Position document in frame"
+                   class="msg-input">
+          </label>
+          <label>MOVE_CLOSER
+            <input type="text" id="msg_MOVE_CLOSER" value="Move closer to document"
+                   class="msg-input">
+          </label>
+          <label>CENTER_DOCUMENT
+            <input type="text" id="msg_CENTER_DOCUMENT" value="Move document away from edges"
+                   class="msg-input">
+          </label>
+          <label>SHARPEN
+            <input type="text" id="msg_SHARPEN" value="Hold steady — image is blurry"
+                   class="msg-input">
+          </label>
+          <label>REDUCE_GLARE
+            <input type="text" id="msg_REDUCE_GLARE" value="Reduce glare — tilt document slightly"
+                   class="msg-input">
+          </label>
+          <label>IMPROVE_LIGHTING
+            <input type="text" id="msg_IMPROVE_LIGHTING" value="Too dark — improve lighting"
+                   class="msg-input">
+          </label>
+          <label>HOLD_STILL
+            <input type="text" id="msg_HOLD_STILL" value="Hold still…"
+                   class="msg-input">
+          </label>
+          <label>CONFIRMED
+            <input type="text" id="msg_CONFIRMED" value="Document detected — hold still"
+                   class="msg-input">
+          </label>
+        </div>
       </div>
       <button id="applyConfigBtn" class="config-btn">Apply &amp; Restart</button>
     </details>
@@ -840,7 +894,9 @@ let snap           = null;
 let stream         = null;
 let sideObjectUrls = [];   // [{ full: url|null, doc: url|null }] — one per captured side
 let capturedSides  = [];   // CaptureResult array for the current session
+let _lastCompletedSides = [];  // Preserved for API buttons after auto-restart
 let activeSide     = 0;
+let _autoRestartTimer = null;  // setTimeout ID for auto-restart after capture
 
 const MAX_HISTORY    = 20;
 const captureHistory = [];
@@ -850,14 +906,78 @@ const shutterAudio = new Audio('shutter.mp3');
 shutterAudio.preload = 'auto';
 
 function triggerShutter() {
-  // White flash — remove class first to allow re-triggering on consecutive captures
-  shutterFlash.classList.remove('active');
-  void shutterFlash.offsetWidth;          // force reflow to restart animation
-  shutterFlash.classList.add('active');
-  // Sound — reset to start so rapid captures always play from the top
+  // Start audio first — browsers introduce ~100-300ms latency before sound plays.
+  // Delay the visual flash so it syncs with the actual sound onset.
   shutterAudio.currentTime = 0;
-  shutterAudio.play().catch(() => {});    // silently ignore autoplay policy blocks
+  var playPromise = shutterAudio.play();
+
+  function fireFlash() {
+    shutterFlash.classList.remove('active');
+    void shutterFlash.offsetWidth;          // force reflow to restart animation
+    shutterFlash.classList.add('active');
+  }
+
+  if (playPromise && typeof playPromise.then === 'function') {
+    // play() resolved → audio is decoding/playing; fire flash now
+    playPromise.then(fireFlash).catch(function () {
+      // Autoplay blocked — fire flash without sound
+      fireFlash();
+    });
+  } else {
+    // Old browser without Promise-based play()
+    fireFlash();
+  }
 }
+
+// ── Doc type dependent settings ──────────────────────────────────────────
+function onDocTypeChange() {
+  var dt = document.getElementById('cfgDocType').value;
+  var isDoc = (dt === 'document');
+  var cfgSides = document.getElementById('cfgSides');
+  var cfgFace  = document.getElementById('cfgFace');
+  cfgSides.disabled = isDoc;
+  cfgFace.disabled  = isDoc;
+  if (isDoc) {
+    cfgSides.value = '1';
+    cfgFace.value  = 'off';
+  }
+}
+
+// ── Settings persistence ──────────────────────────────────────────────────
+const SETTINGS_KEY = 'docusnap_settings';
+const SETTING_IDS  = ['cfgDocType','cfgMode','cfgSides','cfgFace','cfgSharpness','cfgBrightness','cfgGlare','cfgDocSize','cfgLivenessProxy',
+  'msg_SEARCHING','msg_MOVE_CLOSER','msg_CENTER_DOCUMENT','msg_SHARPEN','msg_REDUCE_GLARE','msg_IMPROVE_LIGHTING','msg_HOLD_STILL','msg_CONFIRMED'];
+
+function saveSettings() {
+  try {
+    var obj = {};
+    SETTING_IDS.forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) obj[id] = el.value;
+    });
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(obj));
+  } catch (e) { /* localStorage unavailable */ }
+}
+
+function loadSettings() {
+  try {
+    var raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return;
+    var obj = JSON.parse(raw);
+    // Migrate legacy "passport" to "id"
+    if (obj['cfgDocType'] === 'passport') obj['cfgDocType'] = 'id';
+    SETTING_IDS.forEach(function (id) {
+      if (obj[id] !== undefined) {
+        var el = document.getElementById(id);
+        if (el) el.value = obj[id];
+      }
+    });
+  } catch (e) { /* ignore */ }
+}
+
+// Restore saved settings before first buildConfig
+loadSettings();
+onDocTypeChange();
 
 // ── Config ────────────────────────────────────────────────────────────────
 function buildConfig() {
@@ -889,6 +1009,7 @@ async function initApp() {
 }
 
 async function startCapture(forceFile) {
+  if (_autoRestartTimer) { clearTimeout(_autoRestartTimer); _autoRestartTimer = null; }
   destroySnap();
   activeSide = 0;
   revokeCapturedUrls();
@@ -983,13 +1104,10 @@ function showFallbackMode() {
 // We hold each message for at least INSTRUCTION_MIN_MS before switching to a
 // different one.  State transitions (SEARCHING / CONFIRMED / HOLD_STILL) are
 // always applied immediately — they represent real workflow phase changes.
-const INSTRUCTION_MIN_MS = 1000;
-// Only CONFIRMED and HOLD_STILL bypass the 1-second throttle.
-// SEARCHING is deliberately excluded: including it caused SEARCHING ↔ failure-code
-// flicker (every transition from SEARCHING resets the throttle, allowing the next
-// failure code to appear instantly, which in turn transitions back to SEARCHING
-// instantly, creating a per-frame oscillation).
-const INSTANT_CODES = new Set(['CONFIRMED', 'HOLD_STILL']);
+const INSTRUCTION_MIN_MS = 800;
+// State-transition codes bypass the 800ms throttle (incoming only).
+// The throttle only gates failure-code ↔ failure-code swaps.
+const INSTANT_CODES = new Set(['CONFIRMED', 'HOLD_STILL', 'SEARCHING']);
 let _dispCode      = null;   // instruction code currently shown
 let _dispHint      = '';     // hint text currently shown
 let _dispEscalated = false;  // hintEscalated flag for the shown hint
@@ -1000,7 +1118,8 @@ function resolveDisplayCode(frame) {
   if (code === _dispCode) return;  // nothing changed — keep current
   // Update immediately for privileged state transitions; throttle between
   // failure codes to avoid distracting rapid text changes.
-  const instant = INSTANT_CODES.has(code) || INSTANT_CODES.has(_dispCode);
+  // Only allow instant transition TO privileged codes, never FROM them
+  const instant = INSTANT_CODES.has(code);
   if (instant || (performance.now() - _dispSince) >= INSTRUCTION_MIN_MS) {
     _dispCode      = code;
     _dispHint      = frame.hint;
@@ -1010,11 +1129,20 @@ function resolveDisplayCode(frame) {
 }
 
 // ── Frame handler ──────────────────────────────────────────────────────────
+function getInstructionText(code) {
+  var el = document.getElementById('msg_' + code);
+  return el ? el.value : code;
+}
+
 function handleFrame(frame) {
   const IC = DocuSnap.InstructionCode;
 
   // Resolve which instruction code/hint to display (throttled for failures).
   resolveDisplayCode(frame);
+
+  // Feed customizable message text to canvas overlay only
+  var canvasText = _dispCode ? getInstructionText(_dispCode) : '';
+  if (snap) snap.setCanvasInstruction(canvasText);
 
   // Update step indicator from live sideIndex (shows which side is being scanned)
   if (frame.sidesTotal > 1) updateSideSteps(frame.sideIndex, frame.sidesTotal);
@@ -1038,18 +1166,13 @@ function handleFrame(frame) {
     : _dispEscalated ? 'escalated' : '';
   }
 
-  // Score / state line — uses throttled code
-  if (_dispCode === IC.SEARCHING) {
-    scoreEl.textContent = 'LOOKING FOR DOCUMENT';
-    scoreEl.className   = 'qp-score';
-    scoreEl.style.color = '#ff4757';
-  } else if (_dispCode === IC.CONFIRMED || _dispCode === IC.HOLD_STILL) {
-    scoreEl.textContent = _dispCode === IC.HOLD_STILL ? '✅ Hold still…' : '✅ Ready';
+  // Score / state line — shows raw instruction code name
+  if (_dispCode === IC.CONFIRMED || _dispCode === IC.HOLD_STILL) {
+    scoreEl.textContent = _dispCode;
     scoreEl.className   = 'qp-score';
     scoreEl.style.color = '#2ed573';
   } else {
-    const IC_LABELS = { SHARPEN: 'TOO BLURRY' };
-    scoreEl.textContent = IC_LABELS[_dispCode] || (_dispCode || '').replace(/_/g, ' ');
+    scoreEl.textContent = _dispCode || '–';
     scoreEl.className   = 'qp-score';
     scoreEl.style.color = '#ff4757';
   }
@@ -1107,6 +1230,12 @@ function handleCapture(cr) {
   // Shutter flash + sound for real camera captures (not file uploads)
   if (cr.captureMode !== 'file') triggerShutter();
 
+  // Clear previous API results on every new capture
+  apiResultsRow.style.display = 'none';
+  apiResultsRow.innerHTML     = '';
+  ocrDetailsEl.style.display  = 'none';
+  ocrDetailsEl.innerHTML      = '';
+
   activeSide = cr.sideIndex;
   capturedSides.push(cr);
 
@@ -1132,22 +1261,30 @@ function handleCapture(cr) {
     faceBadge.className       = cr.face.present ? 'present' : 'absent';
   }
 
-  addToHistory(cr);
-
   if (!cr.isLastSide) {
     // ── Intermediate capture (first of multiple sides) ────────────────────
-    // Show the captured image for review, then prompt user to flip
     renderSingleCapture(urls, cr.quality, cr.face);
-    showFlipPrompt(cr);
     updateSideSteps(cr.sideIndex, cr.sidesTotal);
+    // Auto-advance to back side after 2s — detection restarts automatically
+    if (snap) {
+      setTimeout(function () {
+        flipPromptEl.style.display = 'none';
+        if (snap) {
+          snap.nextSide();
+          _dispCode = null; _dispHint = ''; _dispEscalated = false; _dispSince = -INSTRUCTION_MIN_MS;
+        }
+      }, 2000);
+    }
   } else if (cr.sidesTotal > 1) {
-    // ── All sides complete ────────────────────────────────────────────────
+    // ── All sides complete — add grouped entry to history ─────────────────
     flipPromptEl.style.display = 'none';
     renderTwoUpCapture(capturedSides);
     updateSideSteps(cr.sideIndex, cr.sidesTotal);
+    addGroupedToHistory(capturedSides);
   } else {
-    // ── Single-side capture ───────────────────────────────────────────────
+    // ── Single-side capture — add to history ──────────────────────────────
     renderSingleCapture(urls, cr.quality, cr.face);
+    addToHistory(cr);
   }
 
   // Glow effect on result card
@@ -1156,7 +1293,25 @@ function handleCapture(cr) {
 
   // The library automatically pauses when isLastSide === true — no extra call
   // needed here. Re-enable Start so the user can kick off a fresh session.
-  if (cr.isLastSide) startBtn.disabled = false;
+  if (cr.isLastSide) {
+    _lastCompletedSides = capturedSides.slice();
+    startBtn.disabled = false;
+    stopBtn.disabled  = true;
+    // Auto-restart detection after 3 seconds
+    if (_autoRestartTimer) clearTimeout(_autoRestartTimer);
+    _autoRestartTimer = setTimeout(function () {
+      _autoRestartTimer = null;
+      if (snap) {
+        capturedSides = [];
+        sideSteps.style.display = 'none';
+        sideSteps.innerHTML     = '';
+        snap.reset();
+        banner.style.display = '';
+        startBtn.disabled = true;
+        stopBtn.disabled  = false;
+      }
+    }, 3000);
+  }
 
   console.log('[demo] Capture:', {
     sideIndex: cr.sideIndex, isLastSide: cr.isLastSide,
@@ -1205,14 +1360,14 @@ function renderTwoUpCapture(sides) {
       const q    = cr.quality;
       const fail = q.failing || [];
       html += '<div class="two-up-quality">';
-      html += badge('Sharp: '  + q.sharpness.toFixed(0)  + '%', !fail.includes('sharpness'));
-      html += badge('Bright: ' + q.brightness.toFixed(0) + '%', !fail.includes('brightness'));
-      html += badge('Glare: '  + q.glare.toFixed(0)      + '%', !fail.includes('glare'));
-      html += badge('Size: '   + q.size.toFixed(0)        + '%', !fail.includes('size'));
+      html += badge('Sharp:',  q.sharpness.toFixed(0)  + '%', !fail.includes('sharpness'));
+      html += badge('Bright:', q.brightness.toFixed(0) + '%', !fail.includes('brightness'));
+      html += badge('Glare:',  q.glare.toFixed(0)      + '%', !fail.includes('glare'));
+      html += badge('Size:',   q.size.toFixed(0)        + '%', !fail.includes('size'));
       if (cr.face) {
         const p = cr.face.present;
-        html += p === null ? '<span class="hbadge neutral">Face: –</span>'
-                           : badge('Face: ' + (p ? 'Yes' : 'No'), p);
+        html += p === null ? '<span class="hbadge neutral">Face: <span class="hb-val">–</span></span>'
+                           : badge('Face:', (p ? 'Yes' : 'No'), p);
       }
       html += '</div>';
     }
@@ -1315,11 +1470,39 @@ function addToHistory(cr) {
   captureHistory.unshift({
     id: Date.now(), timestamp: cr.timestamp,
     thumbUrl, quality: cr.quality, face: cr.face, sideIndex: cr.sideIndex,
-    livenessResult: null, ocrResult: null,   // filled in after API calls
+    sides: null,   // populated for grouped 2-side entries
+    livenessResult: null, ocrResult: null,
   });
   while (captureHistory.length > MAX_HISTORY) {
     const old = captureHistory.pop();
     if (old.thumbUrl) URL.revokeObjectURL(old.thumbUrl);
+    if (old.sides) old.sides.forEach(function (s) { if (s.thumbUrl) URL.revokeObjectURL(s.thumbUrl); });
+  }
+  renderHistory();
+}
+
+/** Add a grouped 2-side entry directly to history. */
+function addGroupedToHistory(allSides) {
+  var grouped = allSides.map(function (cr) {
+    return {
+      thumbUrl: cr.documentImage ? URL.createObjectURL(cr.documentImage) : null,
+      quality: cr.quality,
+      face: cr.face,
+      sideIndex: cr.sideIndex,
+    };
+  });
+  grouped.sort(function (a, b) { return a.sideIndex - b.sideIndex; });
+  var last = allSides[allSides.length - 1];
+  captureHistory.unshift({
+    id: Date.now(), timestamp: last.timestamp,
+    thumbUrl: null, quality: last.quality, face: last.face, sideIndex: 0,
+    sides: grouped,
+    livenessResult: null, ocrResult: null,
+  });
+  while (captureHistory.length > MAX_HISTORY) {
+    var old = captureHistory.pop();
+    if (old.thumbUrl) URL.revokeObjectURL(old.thumbUrl);
+    if (old.sides) old.sides.forEach(function (s) { if (s.thumbUrl) URL.revokeObjectURL(s.thumbUrl); });
   }
   renderHistory();
 }
@@ -1339,19 +1522,19 @@ function renderHistory() {
     let badges = '';
     if (q) {
       badges +=
-        badge('Sharp: '  + q.sharpness.toFixed(0)  + '%', !q.failing.includes('sharpness'))  +
-        badge('Bright: ' + q.brightness.toFixed(0) + '%', !q.failing.includes('brightness')) +
-        badge('Glare: '  + q.glare.toFixed(0)      + '%', !q.failing.includes('glare'))      +
-        badge('Size: '   + q.size.toFixed(0)        + '%', !q.failing.includes('size'));
+        badge('Sharp:',  q.sharpness.toFixed(0)  + '%', !q.failing.includes('sharpness'))  +
+        badge('Bright:', q.brightness.toFixed(0) + '%', !q.failing.includes('brightness')) +
+        badge('Glare:',  q.glare.toFixed(0)      + '%', !q.failing.includes('glare'))      +
+        badge('Size:',   q.size.toFixed(0)        + '%', !q.failing.includes('size'));
     }
     // Show face badge whenever face detection was active (face object present),
     // using neutral style when result is still pending (present === null).
     if (e.face) {
       const p = e.face.present;
       if (p === null) {
-        badges += '<span class="hbadge neutral">Face: –</span>';
+        badges += '<span class="hbadge neutral">Face: <span class="hb-val">–</span></span>';
       } else {
-        badges += badge('Face: ' + (p ? 'Yes' : 'No'), p);
+        badges += badge('Face:', (p ? 'Yes' : 'No'), p);
       }
     }
 
@@ -1361,17 +1544,17 @@ function renderHistory() {
       var agg = ld.aggregate_liveness_probability;
       if (typeof agg === 'number') {
         badges += '<span class="hbadge hbadge-live ' + (agg >= 0.5 ? 'pass' : 'fail') + '">' +
-                  '🔍 Live: ' + (agg * 100).toFixed(1) + '%</span>';
+                  'Liveness: <span class="hb-val">' + (agg * 100).toFixed(1) + '%</span></span>';
       }
       if (ld.pipeline_results) {
-        var pipeLabels = { 'default-sr': 'SR', 'default-pc': 'PC', 'default-ps': 'PS' };
+        var pipeLabels = { 'default-sr': 'Screen', 'default-pc': 'Print', 'default-ps': 'Portrait' };
         ld.pipeline_results.forEach(function (pr) {
           var prob = pr.result && typeof pr.result.liveness_probability === 'number'
             ? (pr.result.liveness_probability * 100).toFixed(1) + '%'
             : (pr.result && pr.result.status_code) || '–';
           var pass2 = pr.result && pr.result.liveness_probability >= 0.5;
           badges += '<span class="hbadge hbadge-live ' + (pass2 ? 'pass' : 'fail') + '">' +
-                    (pipeLabels[pr.pipeline_name] || pr.pipeline_name) + ': ' + prob + '</span>';
+                    (pipeLabels[pr.pipeline_name] || pr.pipeline_name) + ': <span class="hb-val">' + prob + '</span></span>';
         });
       }
     }
@@ -1393,12 +1576,30 @@ function renderHistory() {
       }
     }
 
-    item.innerHTML =
-      '<div class="history-img-wrap">' +
+    // Thumbnail(s)
+    var imgHtml = '';
+    if (e.sides && e.sides.length > 1) {
+      // Grouped 2-side entry: side-by-side thumbnails
+      imgHtml = '<div class="history-img-wrap history-img-pair">';
+      e.sides.forEach(function (s) {
+        var lbl = s.sideIndex === 0 ? 'Front' : 'Back';
+        imgHtml += '<div class="history-side">' +
+          (s.thumbUrl ? '<img src="' + s.thumbUrl + '" alt="' + lbl + '">' : '<div class="no-thumb">–</div>') +
+          '<div class="history-side-lbl">' + lbl + '</div>' +
+        '</div>';
+      });
+      imgHtml += '</div>';
+    } else {
+      imgHtml = '<div class="history-img-wrap">' +
         (e.thumbUrl ? '<img src="' + e.thumbUrl + '" alt="capture">' : '<div class="no-thumb">No image</div>') +
-      '</div>' +
+      '</div>';
+    }
+
+    var sideLabel = e.sides ? (e.sides.length + ' sides') : ('Side ' + (e.sideIndex + 1));
+    item.innerHTML =
+      imgHtml +
       '<div class="history-info">' +
-        '<div class="history-ts">' + ts + ' · Side ' + (e.sideIndex + 1) + '</div>' +
+        '<div class="history-ts">' + ts + ' · ' + sideLabel + '</div>' +
         '<div class="history-badges">' + badges + '</div>' +
       '</div>';
 
@@ -1406,8 +1607,9 @@ function renderHistory() {
   });
 }
 
-function badge(label, pass) {
-  return '<span class="hbadge ' + (pass ? 'pass' : 'fail') + '">' + label + '</span>';
+function badge(label, value, pass) {
+  return '<span class="hbadge ' + (pass ? 'pass' : 'fail') + '">' +
+    label + ' <span class="hb-val">' + value + '</span></span>';
 }
 
 // ── Result panel helpers ───────────────────────────────────────────────────
@@ -1465,13 +1667,14 @@ function blobToBase64(blob) {
 
 /** Always use the full-res cropped image of the front side (side 0). */
 function getFrontDocBlob() {
-  var side0 = capturedSides.find(function (cr) { return cr.sideIndex === 0; });
+  var sides = capturedSides.length ? capturedSides : _lastCompletedSides;
+  var side0 = sides.find(function (cr) { return cr.sideIndex === 0; });
   return side0 ? (side0.documentImage || side0.image) : null;
 }
 
 /** Show / hide the API actions panel (call when Cropped tab becomes active). */
 function showApiActions() {
-  if (!capturedSides.length) return;
+  if (!capturedSides.length && !_lastCompletedSides.length) return;
   apiActionsEl.style.display = 'flex';
   // Re-render any previously fetched results for the current session
   var he = captureHistory[0];
@@ -1542,14 +1745,15 @@ async function checkLiveness() {
 
 // ── Microblink BlinkID OCR ─────────────────────────────────────────────────
 async function sendToOCR() {
-  if (!capturedSides.length) { alert('No capture available.'); return; }
+  var _sides = capturedSides.length ? capturedSides : _lastCompletedSides;
+  if (!_sides.length) { alert('No capture available.'); return; }
 
   ocrBtn.disabled = true;
   ocrBtn.innerHTML = '<span class="api-spin"></span> Scanning…';
 
   try {
-    var front     = capturedSides.find(function (cr) { return cr.sideIndex === 0; });
-    var back      = capturedSides.find(function (cr) { return cr.sideIndex === 1; });
+    var front     = _sides.find(function (cr) { return cr.sideIndex === 0; });
+    var back      = _sides.find(function (cr) { return cr.sideIndex === 1; });
     var frontBlob = front ? (front.documentImage || front.image) : null;
     var backBlob  = back  ? (back.documentImage  || back.image)  : null;
     var isCropped = !!(front && front.documentImage);
@@ -1626,9 +1830,10 @@ function renderApiResultsRow(livenessData, ocrData) {
   if (livenessData) {
     var agg = livenessData.aggregate_liveness_probability;
     var aggPct = typeof agg === 'number' ? (agg * 100).toFixed(1) + '%' : '–';
-    html += apiCell('Live (agg)', aggPct, typeof agg === 'number' ? (agg >= 0.5 ? 'green' : 'red') : '');
+    var aggPass = typeof agg === 'number' ? agg >= 0.5 : null;
+    html += apiCell('Liveness', aggPct, aggPass);
 
-    var pipeLabels = { 'default-sr': 'SR', 'default-pc': 'PC', 'default-ps': 'PS' };
+    var pipeLabels = { 'default-sr': 'Screen', 'default-pc': 'Print', 'default-ps': 'Portrait' };
     if (livenessData.pipeline_results) {
       livenessData.pipeline_results.forEach(function (pr) {
         var lbl  = pipeLabels[pr.pipeline_name] || pr.pipeline_name;
@@ -1636,12 +1841,12 @@ function renderApiResultsRow(livenessData, ocrData) {
           ? (pr.result.liveness_probability * 100).toFixed(1) + '%'
           : (pr.result && pr.result.status_code) || '–';
         var pass = pr.result && pr.result.liveness_probability >= 0.5;
-        html += apiCell(lbl, prob, pass ? 'green' : 'red');
+        html += apiCell(lbl, prob, pass);
       });
     }
     var warn = livenessData.aggregate_image_quality_warnings;
     if (warn && warn.length) {
-      html += apiCell('Warnings', warn.join(', '), 'amber');
+      html += apiCell('Warnings', warn.join(', '), null, 'amber');
     }
   }
 
@@ -1649,23 +1854,30 @@ function renderApiResultsRow(livenessData, ocrData) {
     var r = ocrData.result || ocrData.recognizerResults || ocrData;
     function sv(f) { return f && f.value ? f.value : (typeof f === 'string' ? f : null); }
     var name = [sv(r.firstName), sv(r.lastName)].filter(Boolean).join(' ');
-    if (name) html += apiCell('Name', name, 'green');
+    if (name) html += apiCell('Name', name, true);
     var docNo = sv(r.documentNumber);
-    if (docNo) html += apiCell('Doc#', docNo, '');
+    if (docNo) html += apiCell('Doc#', docNo, null);
     var status = ocrData.executionStatus || ocrData.status;
-    if (status) html += apiCell('Status', status, status === 'VALID' ? 'green' : 'amber');
+    if (status) html += apiCell('Status', status, status === 'VALID' ? true : null, 'amber');
   }
 
   if (html) {
-    apiResultsRow.style.display = 'flex';
+    apiResultsRow.style.display = 'grid';
     apiResultsRow.innerHTML = html;
   }
 }
 
-function apiCell(label, value, colorCls) {
+function apiCell(label, value, pass, forceColor) {
+  var colorCls = forceColor || '';
+  var icon = '';
+  if (!forceColor && pass !== null && pass !== undefined) {
+    colorCls = pass ? 'green' : 'red';
+    icon = '<span class="api-cell-status">' + (pass ? '✅' : '❌') + '</span>';
+  }
   return '<div class="api-cell">' +
     '<span class="api-cell-lbl">' + label + '</span>' +
-    '<span class="api-cell-val ' + (colorCls || '') + '">' + value + '</span>' +
+    '<span class="api-cell-val ' + colorCls + '">' + value + '</span>' +
+    icon +
     '</div>';
 }
 
@@ -1736,8 +1948,9 @@ stopBtn.addEventListener('click', () => {
   showCameraMode();
   startBtn.disabled        = false;
   stopBtn.disabled         = true;
-  captureBtn.style.display = 'none';  // always hide on stop
-  captureBtn.disabled      = true;
+  captureBtn.style.display     = 'none';  // always hide on stop
+  captureBtn.disabled          = true;
+  if (_autoRestartTimer) { clearTimeout(_autoRestartTimer); _autoRestartTimer = null; }
   banner.style.display     = 'none';
   scoreEl.textContent      = '–';
   scoreEl.style.color      = '#fff';
@@ -1763,6 +1976,7 @@ livenessBtn.addEventListener('click', checkLiveness);
 ocrBtn.addEventListener('click',      sendToOCR);
 
 applyConfig.addEventListener('click', () => {
+  saveSettings();
   startCapture(false);
   applyConfig.closest('details').open = false;
 });

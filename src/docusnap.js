@@ -1607,7 +1607,8 @@
       this._evaluating = false;
 
       // Bounding box smoothing state
-      this._stableCorners = null;        // Ground truth corners (validated)
+      this._stableCorners = null;        // Ground truth corners (validated, display space)
+      this._stableFullCorners = null;    // Ground truth corners (full video resolution)
       this._displayCorners = null;       // Currently displayed corners (smoothed)
       this._cornerRejectCount = 0;       // Frames rejecting stable corners
       this._confirmFramesNeeded = 20;    // ~2s of missed frames before clearing the box
@@ -1619,6 +1620,16 @@
       // Bounding box overlay opacity state (0 = clear, 70 = max overlay)
       this._currentTransparency = 70;    // Start with overlay (will fade as quality improves)
       this._transparencyStep = 5;        // Change by 5% per frame
+
+      // Cached display state for 60fps rendering (updated by _evaluateFrame)
+      this._lastDispW = 0;
+      this._lastDispH = 0;
+      this._lastReport = null;
+      this._lastInstruction = '';        // Current feedback text for canvas overlay
+      this._pendingInstruction = '';    // Next text, queued during fade-out
+      this._instructionOpacity = 0;     // Current opacity (0–1) for fade animation
+      this._instructionFadeTarget = 0;  // Target opacity (0 or 1)
+      this._prevInstructionText = '';    // Previous text for fade-out/in transition
     }
 
     start() {
@@ -1633,10 +1644,27 @@
       this._candidates = [];
       this._evaluating = false;
       this._stableCorners = null;
+      this._stableFullCorners = null;
       this._displayCorners = null;
       this._cornerRejectCount = 0;
       this._kalmanFilters = null;
       this._currentTransparency = 70;    // Reset overlay opacity
+      // Initialize display dimensions from video if available
+      if (this._video && this._video.videoWidth) {
+        var _vw = this._video.videoWidth, _vh = this._video.videoHeight;
+        var _ds = Math.min(1, 720 / Math.max(_vw, _vh));
+        this._lastDispW = Math.round(_vw * _ds);
+        this._lastDispH = Math.round(_vh * _ds);
+      } else {
+        this._lastDispW = 0;
+        this._lastDispH = 0;
+      }
+      this._lastReport = null;
+      this._lastInstruction = '';
+      this._pendingInstruction = '';
+      this._instructionOpacity = 0;
+      this._instructionFadeTarget = 0;
+      this._prevInstructionText = '';
       // Persistent small canvas reused every frame for detection (avoids per-frame allocation)
       if (!this._detCanvas) this._detCanvas = document.createElement("canvas");
       this._onStateChange(State.DETECTING, "Position document in frame");
@@ -1648,6 +1676,30 @@
       if (this._animFrameId) {
         cancelAnimationFrame(this._animFrameId);
         this._animFrameId = null;
+      }
+    }
+
+    /**
+     * Set the instruction text shown on the canvas overlay.
+     * Call from the onFrame callback with throttled/mapped text.
+     * Pass empty string to fade out the instruction.
+     */
+    setCanvasInstruction(text) {
+      text = text || '';
+      if (text === this._lastInstruction && text === this._pendingInstruction) return;
+      if (!text) {
+        // Fade out current text
+        this._pendingInstruction = '';
+        this._instructionFadeTarget = 0;
+      } else if (!this._lastInstruction || this._instructionOpacity < 0.05) {
+        // Nothing showing — set text directly and fade in
+        this._lastInstruction = text;
+        this._pendingInstruction = text;
+        this._instructionFadeTarget = 1;
+      } else if (text !== this._lastInstruction) {
+        // Different text while something is showing — queue and fade out first
+        this._pendingInstruction = text;
+        this._instructionFadeTarget = 0;
       }
     }
 
@@ -1663,11 +1715,11 @@
      */
     capture() {
       if (this._state === State.IDLE || this._state === State.CAPTURED) return;
-      // Ensure at least one candidate exists (use stable corners from Kalman smoother)
+      // Ensure at least one candidate exists — use full-res corners (not display-space)
       if (this._candidates.length === 0) {
         this._candidates.push({
           sharpness:   0,
-          fullCorners: this._stableCorners || null,
+          fullCorners: this._stableFullCorners || null,
           report:      null,
         });
       }
@@ -1684,25 +1736,19 @@
       this._animFrameId = requestAnimationFrame(function (timestamp) {
         if (self._state === State.IDLE) return;
 
+        // ── Always render video + overlay at 60fps ──────────────────────
+        self._renderFrame();
+
         // When captured (waiting for nextSide / user interaction), keep the canvas
         // alive so the video preview stays live during the flip prompt.
         // No quality evaluation and no new captures fire in this state.
         if (self._state === State.CAPTURED) {
-          if (self._canvas && self._video && self._video.videoWidth) {
-            var _cctx = self._canvas.getContext('2d');
-            _cctx.drawImage(self._video, 0, 0, self._canvas.width, self._canvas.height);
-          }
           self._tick();
           return;
         }
 
-        // Skip if still processing previous frame (async inference)
-        if (self._evaluating) {
-          self._tick();
-          return;
-        }
-
-        if (timestamp - self._lastEvalTime >= self._frameIntervalMs) {
+        // Run detection at the configured interval (default ~10fps)
+        if (!self._evaluating && timestamp - self._lastEvalTime >= self._frameIntervalMs) {
           self._lastEvalTime = timestamp;
           self._evaluating = true;
           self._evaluateFrame().then(function () {
@@ -1715,6 +1761,103 @@
 
         self._tick();
       });
+    }
+
+    /** @private - Render video + bounding box overlay at 60fps (called from _tick) */
+    _renderFrame() {
+      if (!this._canvas || !this._video || !this._video.videoWidth) return;
+
+      var dispW = this._lastDispW || this._canvas.width;
+      var dispH = this._lastDispH || this._canvas.height;
+      if (!dispW || !dispH) return;
+
+      // Resize only when dimensions actually change
+      if (this._canvas.width !== dispW || this._canvas.height !== dispH) {
+        this._canvas.width  = dispW;
+        this._canvas.height = dispH;
+        this._canvas.style.aspectRatio = dispW + " / " + dispH;
+      }
+
+      var ctx = this._canvas.getContext("2d");
+      ctx.drawImage(this._video, 0, 0, dispW, dispH);
+
+      // Convexity guard: bowtie corners from Kalman crossing → reset
+      if (this._displayCorners && !this._isCornersConvex(this._displayCorners)) {
+        this._displayCorners = null;
+        this._stableCorners  = null;
+        this._stableFullCorners = null;
+        this._kalmanFilters  = null;
+      }
+
+      // Don't draw overlay when captured — just show clean video feed
+      if (this._state === State.CAPTURED) return;
+
+      if (this._displayCorners && this._lastReport) {
+        this._drawSpotlightOverlay(ctx, this._displayCorners, this._lastReport, dispW, dispH);
+      } else {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+        ctx.fillRect(0, 0, dispW, dispH);
+      }
+
+      // Animate instruction opacity towards target (~250ms fade)
+      var fadeSpeed = 0.042;  // per frame at 60fps ≈ 400ms transition
+      if (this._instructionOpacity < this._instructionFadeTarget) {
+        this._instructionOpacity = Math.min(1, this._instructionOpacity + fadeSpeed);
+      } else if (this._instructionOpacity > this._instructionFadeTarget) {
+        this._instructionOpacity = Math.max(0, this._instructionOpacity - fadeSpeed);
+      }
+
+      // When fade-out completes and there's pending text, swap and fade in
+      if (this._instructionOpacity < 0.02 && this._pendingInstruction &&
+          this._pendingInstruction !== this._lastInstruction) {
+        this._lastInstruction = this._pendingInstruction;
+        this._instructionFadeTarget = 1;
+      }
+
+      // Draw instruction text with current opacity
+      if (this._instructionOpacity > 0.01 && this._lastInstruction) {
+        this._drawInstruction(ctx, this._lastInstruction, dispW, dispH, this._instructionOpacity);
+      }
+    }
+
+    /** @private - Draw feedback instruction text centered on the canvas */
+    _drawInstruction(ctx, text, w, h, opacity) {
+      var fontSize = Math.max(14, Math.round(w * 0.035));
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      ctx.font = '600 ' + fontSize + 'px -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // Position: lower third of the canvas
+      var y = h * 0.85;
+
+      // Semi-transparent pill background
+      var metrics = ctx.measureText(text);
+      var padX = fontSize * 0.8;
+      var padY = fontSize * 0.45;
+      var pillW = metrics.width + padX * 2;
+      var pillH = fontSize + padY * 2;
+      var pillX = (w - pillW) / 2;
+      var pillY = y - pillH / 2;
+      var radius = pillH / 2;
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+      ctx.beginPath();
+      ctx.moveTo(pillX + radius, pillY);
+      ctx.lineTo(pillX + pillW - radius, pillY);
+      ctx.arcTo(pillX + pillW, pillY, pillX + pillW, pillY + pillH, radius);
+      ctx.arcTo(pillX + pillW, pillY + pillH, pillX, pillY + pillH, radius);
+      ctx.lineTo(pillX + radius, pillY + pillH);
+      ctx.arcTo(pillX, pillY + pillH, pillX, pillY, radius);
+      ctx.arcTo(pillX, pillY, pillX + pillW, pillY, radius);
+      ctx.closePath();
+      ctx.fill();
+
+      // White text
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(text, w / 2, y);
+      ctx.restore();
     }
 
     /**
@@ -1797,35 +1940,12 @@
       }
 
       // ── Kalman smoother operates in display space ──────────────────────
-      this._updateStableCorners(dispCorners, dispW, dispH);
+      this._updateStableCorners(dispCorners, fullCorners, dispW, dispH);
 
-      // ── Draw to display canvas ─────────────────────────────────────────
-      if (this._canvas) {
-        // Resize only when dimensions actually change (avoids clearing + reflow every frame)
-        if (this._canvas.width !== dispW || this._canvas.height !== dispH) {
-          this._canvas.width  = dispW;
-          this._canvas.height = dispH;
-          this._canvas.style.aspectRatio = dispW + " / " + dispH;
-        }
-        var canvasCtx = this._canvas.getContext("2d");
-
-        // Draw video at display resolution directly (no intermediate canvas copy)
-        canvasCtx.drawImage(video, 0, 0, dispW, dispH);
-
-        // Convexity guard: bowtie corners from Kalman crossing → reset
-        if (this._displayCorners && !this._isCornersConvex(this._displayCorners)) {
-          this._displayCorners = null;
-          this._stableCorners  = null;
-          this._kalmanFilters  = null;
-        }
-
-        if (this._displayCorners) {
-          this._drawSpotlightOverlay(canvasCtx, this._displayCorners, report, dispW, dispH);
-        } else {
-          canvasCtx.fillStyle = "rgba(0, 0, 0, 0.5)";
-          canvasCtx.fillRect(0, 0, dispW, dispH);
-        }
-      }
+      // Cache display state for 60fps rendering in _tick
+      this._lastDispW  = dispW;
+      this._lastDispH  = dispH;
+      this._lastReport = report;
 
       // ── State machine ──────────────────────────────────────────────────
       if (this._state === State.DETECTING) {
@@ -1990,8 +2110,8 @@
       }
     }
 
-    /** @private - Update stable corners with Kalman filter smoothing */
-    _updateStableCorners(newCorners, frameW, frameH) {
+    /** @private - Update stable corners with Kalman filter smoothing + 15% clamp */
+    _updateStableCorners(newCorners, newFullCorners, frameW, frameH) {
       // No detection this frame
       if (!newCorners) {
         this._cornerRejectCount++;
@@ -2014,6 +2134,7 @@
         // Only clear after ~2s of continuous missed frames
         if (this._cornerRejectCount >= this._confirmFramesNeeded) {
           this._stableCorners = null;
+          this._stableFullCorners = null;
           this._displayCorners = null;
           this._kalmanFilters = null;
         }
@@ -2027,6 +2148,7 @@
       if (!this._kalmanFilters) {
         this._initKalmanFilters(newCorners);
         this._stableCorners = newCorners;
+        this._stableFullCorners = newFullCorners;
         this._displayCorners = newCorners;
         return;
       }
@@ -2034,19 +2156,31 @@
       // Update Kalman filters with new measurements
       var cornerKeys = ['topLeftCorner', 'topRightCorner', 'bottomLeftCorner', 'bottomRightCorner'];
       var smoothed = {};
-      
+      var maxMove = Math.max(frameW, frameH) * 0.15;  // 15% clamp per detection frame
+
       for (var i = 0; i < cornerKeys.length; i++) {
         var key = cornerKeys[i];
         var measurement = newCorners[key];
-        
+
         // Update X and Y filters
         var filteredX = this._kalmanFilters[i * 2].update(measurement.x);
         var filteredY = this._kalmanFilters[i * 2 + 1].update(measurement.y);
-        
+
+        // 15% max change clamp: prevent sudden jumps from noisy detections
+        if (this._displayCorners) {
+          var prevX = this._displayCorners[key].x;
+          var prevY = this._displayCorners[key].y;
+          var dx = filteredX - prevX;
+          var dy = filteredY - prevY;
+          if (Math.abs(dx) > maxMove) filteredX = prevX + Math.sign(dx) * maxMove;
+          if (Math.abs(dy) > maxMove) filteredY = prevY + Math.sign(dy) * maxMove;
+        }
+
         smoothed[key] = { x: filteredX, y: filteredY };
       }
 
       this._stableCorners = newCorners;
+      this._stableFullCorners = newFullCorners;
       this._displayCorners = smoothed;
     }
 
@@ -2924,6 +3058,11 @@
       }
     }
 
+    /** Set the instruction text shown on the canvas overlay (with fade animation). */
+    setCanvasInstruction(text) {
+      if (this._autoCapture) this._autoCapture.setCanvasInstruction(text);
+    }
+
     /** Advance to next document side. Call from onCapture when sides > 1. */
     nextSide() {
       if (this._currentSide >= this.sides - 1) return;
@@ -3246,8 +3385,11 @@
     }
 
     _aspectLimits(docType) {
-      var m = { id: { min: 1.4, max: 1.8 }, passport: { min: 1.2, max: 1.6 },
-                document: { min: 1.0, max: 2.0 }, any: { min: 1.2, max: 1.8 } };
+      var m = {
+        id:       { min: 1.2, max: 1.8 },   // ID cards + passports (credit-card shape)
+        document: { min: 1.2, max: 1.6 },   // Letter (1.294) / A4 (1.414) portrait
+        any:      { min: 1.0, max: 2.2 },   // relaxed — accept wide range of shapes
+      };
       return m[docType] || m.any;
     }
 
