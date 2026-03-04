@@ -1372,7 +1372,8 @@ function renderHistory() {
     // OCR badge
     var ocrName = '';
     if (e.ocrResult) {
-      var r2 = e.ocrResult.result || e.ocrResult.recognizerResults || e.ocrResult;
+      var _ocrTop = (e.ocrResult.data && typeof e.ocrResult.data === 'object') ? e.ocrResult.data : e.ocrResult;
+      var r2 = _ocrTop.result || _ocrTop.recognizerResults || _ocrTop;
       function sv2(f) { return f && f.value ? f.value : (typeof f === 'string' ? f : ''); }
       ocrName = [sv2(r2.firstName), sv2(r2.lastName)].filter(Boolean).join(' ');
       var docNo2 = sv2(r2.documentNumber);
@@ -1506,9 +1507,15 @@ async function checkLiveness() {
     renderApiResultsRow(data, captureHistory[0] && captureHistory[0].ocrResult);
     renderHistory();
   } catch (err) {
+    var livMsg = err.message;
+    // "Failed to fetch" is the browser's CORS/network error — give a helpful hint.
+    if (err instanceof TypeError && livMsg === 'Failed to fetch') {
+      livMsg = 'CORS blocked — the ID R&amp;D API must be called server-side. ' +
+               'Configure a backend proxy that forwards requests to idlivedoc-rest-api.idrnd.net.';
+    }
     apiResultsRow.style.display = 'flex';
     apiResultsRow.innerHTML =
-      '<span style="color:#ff4757;font-size:11px;">⚠ Liveness error: ' + err.message + '</span>';
+      '<span style="color:#ff4757;font-size:11px;">⚠ Liveness error: ' + livMsg + '</span>';
   } finally {
     livenessBtn.disabled = false;
     livenessBtn.innerHTML = '🔍 Check Liveness';
@@ -1533,13 +1540,13 @@ async function sendToOCR() {
       returnFullDocumentImage: false,
       returnFaceImage:         false,
       returnSignatureImage:    false,
-      imageFirstSide: { imageBase64: await blobToBase64(frontBlob) },
+      imageFrontSide: await blobToBase64(frontBlob),
     };
     if (backBlob) {
-      body.imageSecondSide = { imageBase64: await blobToBase64(backBlob) };
+      body.imageBackSide = await blobToBase64(backBlob);
     }
 
-    var resp = await fetch('https://api.microblink.com/v1/recognizers/blinkid-multi-side', {
+    var resp = await fetch('https://api.microblink.com/v1/recognizers/blinkid-combined', {
       method: 'POST',
       headers: {
         'Content-Type':  'application/json',
@@ -1620,7 +1627,9 @@ function apiCell(label, value, colorCls) {
 
 /** Render the OCR field details panel. */
 function renderOcrDetails(data) {
-  var r = data.result || data.recognizerResults || data;
+  // Handle both flat { result: {...} } and nested { data: { result: {...} } } shapes.
+  var top = (data.data && typeof data.data === 'object') ? data.data : data;
+  var r = top.result || top.recognizerResults || top;
   function sv(f) { return f && f.value ? String(f.value) : (typeof f === 'string' ? f : null); }
 
   var pairs = [

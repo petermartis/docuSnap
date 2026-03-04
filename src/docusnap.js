@@ -1665,6 +1665,12 @@
     }
 
     start() {
+      // Cancel any rAF that may still be running from the CAPTURED-state drawing
+      // loop so we never have two concurrent tick loops.
+      if (this._animFrameId) {
+        cancelAnimationFrame(this._animFrameId);
+        this._animFrameId = null;
+      }
       this._state = State.DETECTING;
       this._consecutiveGoodFrames = 0;
       this._candidates = [];
@@ -3153,10 +3159,10 @@
         self._onCapture(cr);
 
         if (cr.isLastSide) {
-          // All sides captured — automatically stop the detection loop.
-          // The caller does not need to do anything extra for the happy path.
-          // Call snap.resume() or snap.reset() to start a new scan session.
-          if (self._autoCapture) { self._autoCapture.stop(); }
+          // All sides captured. Leave DocumentAutoCapture in its CAPTURED state
+          // so the _tick drawing loop keeps the canvas live — identical to the
+          // intermediate-side path below.  start() cancels the old rAF if the
+          // integrator calls snap.resume() / snap.reset() to start a new session.
           self._scanState = 'paused';
         } else {
           // Intermediate side captured — pause at the DocuSnap level.
