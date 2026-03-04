@@ -511,6 +511,7 @@
     .api-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     .api-btn-liveness { background: #9b59b6; color: #fff; }
     .api-btn-ocr      { background: #2980b9; color: #fff; }
+    .api-btn-guru     { background: #e67e22; color: #fff; }
 
     /* One-line API result row — same grid as quality indicators */
     #apiResultsRow {
@@ -534,12 +535,18 @@
     .api-cell-val.amber { color: #ffa502; }
 
     /* OCR details panel */
-    #ocrDetails {
+    #ocrDetails, #guruDetails {
       display: none;
       background: #0f0f23;
       border-radius: 8px;
       padding: 10px 12px;
-      border-top: 2px solid #2980b9;
+    }
+    #ocrDetails  { border-top: 2px solid #2980b9; }
+    #guruDetails { border-top: 2px solid #e67e22; }
+    .guru-hdr {
+      color: #e67e22; font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 8px;
     }
     .ocr-hdr {
       color: #2980b9; font-size: 11px; font-weight: 700;
@@ -759,6 +766,13 @@
                  style="width:100%;margin-top:4px;background:#0d0d1a;border:1px solid #333;
                         border-radius:6px;color:#fff;padding:5px 8px;font-size:12px;">
         </label>
+        <label style="grid-column:1/-1">Anthropic API Key
+          <input type="text" id="cfgAnthropicKey"
+                 value=""
+                 placeholder="sk-ant-..."
+                 style="width:100%;margin-top:4px;background:#0d0d1a;border:1px solid #333;
+                        border-radius:6px;color:#fff;padding:5px 8px;font-size:12px;">
+        </label>
       </div>
       <div style="margin-top:12px;border-top:1px solid #333;padding-top:10px;">
         <div style="font-size:12px;color:#aaa;margin-bottom:8px;">Instruction Messages</div>
@@ -816,11 +830,14 @@
           <div class="api-btn-row">
             <button id="livenessBtn" class="api-btn api-btn-liveness">🔍 Check Liveness</button>
             <button id="ocrBtn"      class="api-btn api-btn-ocr">📋 Send to OCR</button>
+            <button id="guruBtn"     class="api-btn api-btn-guru">🧠 Document Guru</button>
           </div>
           <!-- One-line results row (liveness + OCR summary badges) -->
           <div id="apiResultsRow"></div>
           <!-- OCR extracted fields panel -->
           <div id="ocrDetails"></div>
+          <!-- Document Guru extracted fields panel -->
+          <div id="guruDetails"></div>
         </div>
       </div><!-- /.captured-card -->
     <!-- Flip prompt: shown between first and second side captures -->
@@ -839,7 +856,7 @@
   </div><!-- #app -->
 </div><!-- .page -->
 
-<script src="../src/docusnap.js?v=4"></script>
+<script src="../src/docusnap.js?v=5"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function () {
   document.getElementById('loading').style.display = 'none';
@@ -880,8 +897,10 @@ const shutterFlash   = document.getElementById('shutterFlash');
 const apiActionsEl   = document.getElementById('apiActions');
 const apiResultsRow  = document.getElementById('apiResultsRow');
 const ocrDetailsEl   = document.getElementById('ocrDetails');
+const guruDetailsEl  = document.getElementById('guruDetails');
 const livenessBtn    = document.getElementById('livenessBtn');
 const ocrBtn         = document.getElementById('ocrBtn');
+const guruBtn        = document.getElementById('guruBtn');
 const startBtn       = document.getElementById('startBtn');
 const stopBtn        = document.getElementById('stopBtn');
 const captureBtn     = document.getElementById('captureBtn');
@@ -945,7 +964,7 @@ function onDocTypeChange() {
 
 // ── Settings persistence ──────────────────────────────────────────────────
 const SETTINGS_KEY = 'docusnap_settings';
-const SETTING_IDS  = ['cfgDocType','cfgMode','cfgSides','cfgFace','cfgSharpness','cfgBrightness','cfgGlare','cfgDocSize','cfgLivenessProxy',
+const SETTING_IDS  = ['cfgDocType','cfgMode','cfgSides','cfgFace','cfgSharpness','cfgBrightness','cfgGlare','cfgDocSize','cfgLivenessProxy','cfgAnthropicKey',
   'msg_SEARCHING','msg_MOVE_CLOSER','msg_CENTER_DOCUMENT','msg_SHARPEN','msg_REDUCE_GLARE','msg_IMPROVE_LIGHTING','msg_HOLD_STILL','msg_CONFIRMED'];
 
 function saveSettings() {
@@ -1235,6 +1254,8 @@ function handleCapture(cr) {
   apiResultsRow.innerHTML     = '';
   ocrDetailsEl.style.display  = 'none';
   ocrDetailsEl.innerHTML      = '';
+  guruDetailsEl.style.display = 'none';
+  guruDetailsEl.innerHTML     = '';
 
   activeSide = cr.sideIndex;
   capturedSides.push(cr);
@@ -1641,6 +1662,8 @@ function resetResultPanel() {
   apiResultsRow.innerHTML         = '';
   ocrDetailsEl.style.display      = 'none';
   ocrDetailsEl.innerHTML          = '';
+  guruDetailsEl.style.display     = 'none';
+  guruDetailsEl.innerHTML         = '';
 }
 
 function revokeCapturedUrls() {
@@ -1940,6 +1963,228 @@ function renderOcrDetails(data) {
   ocrDetailsEl.innerHTML = '<div class="ocr-hdr">📋 OCR Result' + statusHtml + '</div>' + inner;
 }
 
+// ── Document Guru (Anthropic Claude Vision) ───────────────────────────────
+
+const GURU_SYSTEM_PROMPT = `You are a universal document classifier and data extractor.
+
+Input: one or more images representing a single document:
+- Government ID card (front only, or front and back photos),
+- Passport (photo page, or photo page + additional page),
+- Proof-of-address documents such as utility bills, bank statements, tax letters,
+- Or other document types.
+
+Your job:
+1) Classify the document.
+2) Extract structured fields according to a fixed JSON schema.
+3) Return ONLY one JSON object following that schema exactly.
+
+RULES
+1. Always output a single valid JSON object. Do not include explanations, comments, or markdown.
+2. Use the JSON schema exactly as provided: never add or remove keys, never change key names.
+3. If a field is not present, unreadable, or uncertain, set it to null, not a guess.
+4. Use YYYY-MM-DD for all dates where possible; otherwise use null.
+5. For ID or passport documents:
+   - Set "document_category" to "id_card" or "passport".
+   - Fill fields in "id_passport_data" as fully as possible.
+   - Leave all fields in "proof_of_address_data" as null.
+6. For proof-of-address documents (utility bill, bank statement, etc.):
+   - Set "document_category" to "proof_of_address".
+   - Set "document_type" to one of: utility_bill, bank_statement, marriage_certificate, birth_certificate, school_diploma, criminal_record, notary_apostille or null if no match.
+   - Fill fields in "proof_of_address_data" as fully as possible.
+   - Leave all fields in "id_passport_data" as null.
+7. For any other document: "document_category" as "other". All id/poa fields null. Put all readable text into "raw_ocr_text".
+8. If multiple images are provided (e.g. front and back of ID), treat them as parts of the SAME document and combine information across images.
+9. Preserve accents and special characters as they appear when readable.
+10. Keep the response concise and under 900 tokens while still filling all applicable fields.`;
+
+const GURU_SCHEMA = `{
+  "document_category": null,
+  "classification_confidence": null,
+  "id_passport_data": {
+    "document_type": null,
+    "issuing_country": null,
+    "document_number": null,
+    "mrz_lines": null,
+    "person": {
+      "full_name": null, "surname": null, "given_names": null,
+      "sex": null, "date_of_birth": null, "place_of_birth": null,
+      "nationality": null, "personal_number": null
+    },
+    "document_details": {
+      "date_of_issue": null, "date_of_expiry": null,
+      "issuing_authority": null, "card_type_label": null, "version_or_series": null
+    },
+    "address": {
+      "full_address": null, "street": null, "city": null,
+      "postal_code": null, "region_or_state": null, "country": null
+    }
+  },
+  "proof_of_address_data": {
+    "document_type": null, "issuer_name": null,
+    "statement_date": null, "reference_period": null,
+    "recipient_name": null,
+    "recipient_address": {
+      "full_address": null, "street": null, "city": null,
+      "postal_code": null, "region_or_state": null, "country": null
+    },
+    "account_or_reference_number": null,
+    "amount_due": null, "currency": null, "due_date": null
+  },
+  "raw_ocr_text": null
+}`;
+
+async function sendToGuru() {
+  var _sides = capturedSides.length ? capturedSides : _lastCompletedSides;
+  if (!_sides.length) { alert('No capture available.'); return; }
+
+  var apiKey = document.getElementById('cfgAnthropicKey').value.trim();
+  if (!apiKey) { alert('Set Anthropic API Key in Settings.'); return; }
+
+  guruBtn.disabled = true;
+  guruBtn.innerHTML = '<span class="api-spin"></span> Analysing…';
+
+  try {
+    var front     = _sides.find(function (cr) { return cr.sideIndex === 0; });
+    var back      = _sides.find(function (cr) { return cr.sideIndex === 1; });
+    var frontBlob = front ? (front.documentImage || front.image) : null;
+    var backBlob  = back  ? (back.documentImage  || back.image)  : null;
+    if (!frontBlob) throw new Error('No front image available');
+
+    // Build image content blocks
+    var imageBlocks = [];
+    var frontB64 = await blobToBase64(frontBlob);
+    imageBlocks.push({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/jpeg', data: frontB64 },
+    });
+    if (backBlob) {
+      var backB64 = await blobToBase64(backBlob);
+      imageBlocks.push({
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/jpeg', data: backB64 },
+      });
+    }
+
+    var userContent = [
+      { type: 'text', text: 'Extract data from this document. Return ONLY one JSON object following this schema exactly:\n\n' + GURU_SCHEMA },
+    ].concat(imageBlocks);
+
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key':       apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type':    'application/json',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model:      'claude-sonnet-4-6-20250514',
+        max_tokens: 1024,
+        temperature: 0.1,
+        system:     GURU_SYSTEM_PROMPT,
+        messages:   [{ role: 'user', content: userContent }],
+      }),
+    });
+    if (!resp.ok) {
+      var errBody = await resp.text();
+      throw new Error('HTTP ' + resp.status + ': ' + errBody.slice(0, 200));
+    }
+    var data = await resp.json();
+
+    // Extract text from response
+    var textParts = (data.content || []).filter(function (b) { return b.type === 'text'; });
+    if (!textParts.length) throw new Error('No text in Claude response');
+    var rawText = textParts[0].text.trim();
+
+    // Parse JSON (strip markdown fences if present)
+    if (rawText.startsWith('```')) rawText = rawText.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+    var parsed = JSON.parse(rawText);
+
+    if (captureHistory.length) captureHistory[0].guruResult = parsed;
+    renderGuruDetails(parsed);
+    renderHistory();
+  } catch (err) {
+    guruDetailsEl.style.display = 'block';
+    guruDetailsEl.innerHTML =
+      '<div class="guru-hdr">Document Guru Error</div>' +
+      '<div style="color:#ff4757;font-size:11px;">' + err.message + '</div>';
+  } finally {
+    guruBtn.disabled = false;
+    guruBtn.innerHTML = '🧠 Document Guru';
+  }
+}
+
+function renderGuruDetails(data) {
+  if (!data) return;
+  var pairs = [];
+  var cat = data.document_category;
+  var conf = data.classification_confidence;
+  pairs.push(['Category', cat || '–']);
+  if (conf != null) pairs.push(['Confidence', (conf * 100).toFixed(0) + '%']);
+
+  // ID / Passport fields
+  var id = data.id_passport_data;
+  if (id && (cat === 'id_card' || cat === 'passport')) {
+    if (id.document_type)    pairs.push(['Doc Type', id.document_type]);
+    if (id.issuing_country)  pairs.push(['Country', id.issuing_country]);
+    if (id.document_number)  pairs.push(['Doc Number', id.document_number]);
+    var p = id.person || {};
+    if (p.full_name)       pairs.push(['Full Name', p.full_name]);
+    if (p.surname)         pairs.push(['Surname', p.surname]);
+    if (p.given_names)     pairs.push(['Given Names', p.given_names]);
+    if (p.sex)             pairs.push(['Sex', p.sex]);
+    if (p.date_of_birth)   pairs.push(['Date of Birth', p.date_of_birth]);
+    if (p.place_of_birth)  pairs.push(['Place of Birth', p.place_of_birth]);
+    if (p.nationality)     pairs.push(['Nationality', p.nationality]);
+    if (p.personal_number) pairs.push(['Personal No', p.personal_number]);
+    var dd = id.document_details || {};
+    if (dd.date_of_issue)     pairs.push(['Issued', dd.date_of_issue]);
+    if (dd.date_of_expiry)    pairs.push(['Expiry', dd.date_of_expiry]);
+    if (dd.issuing_authority) pairs.push(['Authority', dd.issuing_authority]);
+    if (dd.card_type_label)   pairs.push(['Card Label', dd.card_type_label]);
+    var addr = id.address || {};
+    if (addr.full_address) pairs.push(['Address', addr.full_address]);
+    if (id.mrz_lines)     pairs.push(['MRZ', id.mrz_lines]);
+  }
+
+  // Proof of Address fields
+  var poa = data.proof_of_address_data;
+  if (poa && cat === 'proof_of_address') {
+    if (poa.document_type)   pairs.push(['Doc Type', poa.document_type]);
+    if (poa.issuer_name)     pairs.push(['Issuer', poa.issuer_name]);
+    if (poa.statement_date)  pairs.push(['Date', poa.statement_date]);
+    if (poa.recipient_name)  pairs.push(['Recipient', poa.recipient_name]);
+    var ra = poa.recipient_address || {};
+    if (ra.full_address)     pairs.push(['Address', ra.full_address]);
+    if (ra.city)             pairs.push(['City', ra.city]);
+    if (ra.postal_code)      pairs.push(['Postal Code', ra.postal_code]);
+    if (ra.country)          pairs.push(['Country', ra.country]);
+    if (poa.account_or_reference_number) pairs.push(['Account/Ref', poa.account_or_reference_number]);
+    if (poa.amount_due)      pairs.push(['Amount Due', poa.amount_due + (poa.currency ? ' ' + poa.currency : '')]);
+    if (poa.due_date)        pairs.push(['Due Date', poa.due_date]);
+  }
+
+  // Raw OCR text
+  if (data.raw_ocr_text && cat === 'other') {
+    pairs.push(['Raw Text', data.raw_ocr_text]);
+  }
+
+  var inner = '';
+  if (pairs.length) {
+    pairs.forEach(function (p) {
+      inner += '<span class="ocr-key">' + p[0] + '</span>' +
+               '<span class="ocr-val">' + p[1] + '</span>';
+    });
+    inner = '<div class="ocr-fields">' + inner + '</div>';
+  } else {
+    inner = '<pre style="color:#aaa;font-size:10px;white-space:pre-wrap;overflow:auto;max-height:240px;">' +
+            JSON.stringify(data, null, 2).slice(0, 4000) + '</pre>';
+  }
+
+  guruDetailsEl.style.display = 'block';
+  guruDetailsEl.innerHTML = '<div class="guru-hdr">🧠 Document Guru Result</div>' + inner;
+}
+
 // ── Button handlers ────────────────────────────────────────────────────────
 startBtn.addEventListener('click', () => startCapture(false));
 
@@ -1974,6 +2219,7 @@ tabDoc.addEventListener('click', () => {
 
 livenessBtn.addEventListener('click', checkLiveness);
 ocrBtn.addEventListener('click',      sendToOCR);
+guruBtn.addEventListener('click',     sendToGuru);
 
 applyConfig.addEventListener('click', () => {
   saveSettings();

@@ -1724,8 +1724,10 @@
      */
     capture() {
       if (this._state === State.IDLE || this._state === State.CAPTURED) return;
-      // Ensure at least one candidate exists — snapshot current video frame
-      if (this._candidates.length === 0) {
+      // Use buffered frames if available; otherwise snapshot current video frame
+      if (this._frameBuffer.length > 0) {
+        this._candidates = this._frameBuffer.slice();
+      } else {
         var video = this._video;
         var vw = video.videoWidth;
         var vh = video.videoHeight;
@@ -1733,12 +1735,12 @@
         manCanvas.width  = vw;
         manCanvas.height = vh;
         manCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
-        this._candidates.push({
+        this._candidates = [{
           sharpness:   0,
           fullCorners: this._stableFullCorners || null,
           report:      null,
           canvas:      manCanvas,
-        });
+        }];
       }
       this._selectBestFrame();
     }
@@ -1965,46 +1967,18 @@
       this._lastDispH  = dispH;
       this._lastReport = report;
 
-      // ── Rolling frame buffer — snapshot passing frames at full resolution ─
-      if (report.allPassed) {
-        // Reclaim canvas from oldest entry if buffer is full; otherwise create new
-        var frameCanvas;
-        if (this._frameBuffer.length >= this._frameBufferSize) {
-          frameCanvas = this._frameBuffer.shift().canvas;
-        } else {
-          frameCanvas = document.createElement('canvas');
-        }
-        if (frameCanvas.width !== vw || frameCanvas.height !== vh) {
-          frameCanvas.width  = vw;
-          frameCanvas.height = vh;
-        }
-        frameCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
-
-        this._frameBuffer.push({
-          sharpness:   report.checks.sharpness.value,
-          fullCorners: fullCorners,
-          report:      report,
-          timestamp:   performance.now(),
-          canvas:      frameCanvas,
-        });
-      }
-
       // ── State machine ──────────────────────────────────────────────────
       if (this._state === State.DETECTING) {
         if (report.allPassed) {
           this._consecutiveGoodFrames++;
           if (this._consecutiveGoodFrames >= this._consecutiveNeeded) {
-            if (!this._manualMode) {
-              // Enough consecutive good frames — pick the best from buffer and capture immediately
-              this._candidates = this._frameBuffer.slice();
-              this._selectBestFrame();
-            } else {
-              // Manual mode: enter STAY_STILL and wait for explicit capture() call
-              this._state = State.STAY_STILL;
-              this._stayStillStart = performance.now();
-              this._candidates = [];
-              this._onStateChange(State.STAY_STILL, "Hold still...");
-            }
+            // Enter STAY_STILL for both auto and manual modes.
+            // This gives the user visual confirmation (bounding box + "Hold still")
+            // and acts as a stabilisation window to reject transient false detections.
+            this._state = State.STAY_STILL;
+            this._stayStillStart = performance.now();
+            this._candidates = [];
+            this._onStateChange(State.STAY_STILL, "Hold still...");
           }
         } else {
           this._consecutiveGoodFrames = 0;
@@ -2012,24 +1986,39 @@
         }
       }
 
-      // STAY_STILL is only used in manual mode now
       if (this._state === State.STAY_STILL) {
         if (!report.allPassed) {
           this._state = State.DETECTING;
           this._consecutiveGoodFrames = 0;
           this._candidates = [];
+          this._frameBuffer = [];  // flush buffer — detection was inconsistent
           this._onStateChange(State.DETECTING, "Position document in frame");
         } else {
-          var ssCanvas = document.createElement('canvas');
-          ssCanvas.width  = vw;
-          ssCanvas.height = vh;
+          // Accumulate candidates in the buffer (with canvas snapshots)
+          var ssCanvas;
+          if (this._frameBuffer.length >= this._frameBufferSize) {
+            ssCanvas = this._frameBuffer.shift().canvas;
+          } else {
+            ssCanvas = document.createElement('canvas');
+          }
+          if (ssCanvas.width !== vw || ssCanvas.height !== vh) {
+            ssCanvas.width  = vw;
+            ssCanvas.height = vh;
+          }
           ssCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
-          this._candidates.push({
+          this._frameBuffer.push({
             sharpness:   report.checks.sharpness.value,
             fullCorners: fullCorners,
             report:      report,
+            timestamp:   performance.now(),
             canvas:      ssCanvas,
           });
+
+          // Auto mode: capture after stabilisation timeout
+          if (!this._manualMode && performance.now() - this._stayStillStart >= this._stayStillMs) {
+            this._candidates = this._frameBuffer.slice();
+            this._selectBestFrame();
+          }
         }
       }
 
