@@ -1,7 +1,7 @@
 # docuSnap
 
 <!-- badges: replace these placeholders with real shields once a registry entry exists -->
-![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![License: Evaluation/Commercial](https://img.shields.io/badge/license-Evaluation%2FCommercial-orange.svg)
 ![Vanilla JS](https://img.shields.io/badge/zero%20dependencies-vanilla%20JS-yellow.svg)
 ![UMD](https://img.shields.io/badge/module-UMD%20%2F%20CJS%20%2F%20AMD-lightgrey.svg)
 
@@ -195,4 +195,4 @@ All values are **0–100**. Internally the library maps them to raw metric range
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Evaluation / Commercial — contact the author for licensing terms.
