@@ -135,22 +135,17 @@
     .qp-label { display: block; color: #888; font-size: 11px; }
     .qp-score { display: block; font-size: 16px; font-weight: bold; }
 
-    /* 2-column grid — compact on wider screens, single-column on tiny phones */
+    /* auto-fit grid: all items on one row when space allows, wraps on narrow screens */
     .quality-grid {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
       gap: 5px;
       margin-top: 8px;
     }
 
-    @media (max-width: 340px) {
-      .quality-grid { grid-template-columns: 1fr; }
-    }
-
-    /* Face row spans both columns */
+    /* Face row is just a normal grid item (no forced spanning) */
     #faceIndicatorRow {
-      grid-column: 1 / -1;
-      display: none;   /* revealed by JS when face detection is active */
+      display: none;   /* revealed by JS — must set to 'flex' not '' to override this */
     }
 
     .indicator {
@@ -274,15 +269,13 @@
     }
     .tab-btn.active { background: #00d9ff; color: #000; border-color: #00d9ff; }
 
-    /* Captured quality — same 2-col grid as live quality */
+    /* Captured quality — same auto-fit grid as live quality */
     #capturedQuality {
       display: none;   /* grid when capture available */
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
       gap: 4px;
       margin-top: 8px;
     }
-    /* Face row in captured quality spans both cols */
-    #capturedQuality .cap-face { grid-column: 1 / -1; }
 
     .cap-ind {
       display: flex; align-items: center;
@@ -676,8 +669,8 @@ async function startCapture(forceFile) {
 
   // Face detection UI visibility
   const faceActive = cfg.faceConfig.detect;
-  faceRow.style.display   = faceActive ? '' : 'none';
-  faceBadge.style.display = faceActive ? '' : 'none';
+  faceRow.style.display   = faceActive ? 'flex' : 'none';
+  faceBadge.style.display = faceActive ? 'block' : 'none';
   if (faceActive) { faceBadge.textContent = '👤 –'; faceBadge.className = 'unknown'; }
 
   sideIndicator.style.display = cfg.sides > 1 ? '' : 'none';
@@ -809,8 +802,8 @@ function handleFrame(frame) {
   // Face detection row
   if (frame.face !== null && frame.face !== undefined) {
     const requireFace = document.getElementById('cfgFace').value === 'require';
-    faceRow.style.display   = '';
-    faceBadge.style.display = '';
+    faceRow.style.display   = 'flex';
+    faceBadge.style.display = 'block';
     if (frame.face.present === null || searching) {
       indFace.textContent       = '–';
       indFaceStatus.textContent = '⚪';
