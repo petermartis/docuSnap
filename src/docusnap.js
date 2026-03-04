@@ -277,7 +277,7 @@
     // Aspect ratio for ID cards (1.586) and passports (1.42) with ~20% tolerance
     this._minAspect = options.minAspectRatio != null ? options.minAspectRatio : 1.2;
     this._maxAspect = options.maxAspectRatio != null ? options.maxAspectRatio : 1.8;
-    this._minWidthFraction = options.minWidthFraction != null ? options.minWidthFraction : 0.35;  // 35% minimum — card must span at least a third of frame width
+    this._minWidthFraction = options.minWidthFraction != null ? options.minWidthFraction : 0.30;  // 30% minimum — rejects sub-card blobs while still detecting at natural holding distances
     this._maxAreaFraction = options.maxAreaFraction != null ? options.maxAreaFraction : 0.85;
     this._processWidth = options.processWidth || 480;  // Higher res for better edge detection
     // Pre-compute Hough sin/cos tables
@@ -730,7 +730,7 @@
             var quadArea = self._quadArea(sorted);
             var areaFrac = quadArea / frameArea;
             var widthFrac = avgW / pw;  // Width-based doc size
-            if (widthFrac < self._minWidthFraction || areaFrac < 0.08 || areaFrac > self._maxAreaFraction) { _rej.docSize++; continue; }
+            if (widthFrac < self._minWidthFraction || areaFrac > self._maxAreaFraction) { _rej.docSize++; continue; }
 
             // --- HOMOGRAPHY-BASED QUALITY CHECK ---
             // Instead of fragile angle-based patterns, use geometric quality metrics
