@@ -290,6 +290,8 @@
     this._debugData = null;       // Cached pipeline intermediates
     this._lastSobelMag = null;
     this._lastSobelMaxMag = 0;
+    // Line tracking: protect known good lines across frames
+    this._knownLines = null;
   }
 
   /** Initialize Hough lookup tables. */
@@ -350,11 +352,31 @@
     // 5. Hough line transform on edge pixels
     var lines = this._houghLines(edges, pw, ph);
     if (this.debug) console.log('[docuSnap] lines found:', lines.length, lines.slice(0,8).map(function(l){ return {theta: Math.round(l.theta*180/Math.PI)+'°', rho: Math.round(l.rho), votes: l.votes}; }));
+
+    // 5b. Protect known good lines from previous frames
+    if (this._knownLines && this._knownLines.length > 0) {
+      lines = this._protectKnownLines(lines, this._knownLines);
+    }
+
     if (lines.length < 4) { if (this.debug) console.warn('[docuSnap] KILLED: fewer than 4 lines'); return null; }
 
     // 6. Find rectangle from line intersections (pass edges for support scoring)
     var best = this._findRectangleFromLines(lines, pw, ph, scale, edges);
     if (this.debug && !best) console.warn('[docuSnap] KILLED: no valid quad found (see individual rejections above)');
+
+    // 7. Update known lines cache from successful detection
+    if (best && best._lines) {
+      this._knownLines = best._lines.slice();
+    } else if (!best) {
+      // Decay: clear after N misses to avoid stale tracking
+      this._knownLinesMisses = (this._knownLinesMisses || 0) + 1;
+      if (this._knownLinesMisses > 10) {
+        this._knownLines = null;
+        this._knownLinesMisses = 0;
+      }
+    } else {
+      this._knownLinesMisses = 0;
+    }
 
     // Cache pipeline intermediates for debug visualization
     if (this._debugLayer !== 'normal') {
@@ -497,37 +519,52 @@
   };
 
   /**
-   * @private - Sobel edge detection.
+   * @private - Sobel edge detection with clamped Otsu and morphological cleanup.
    * Returns binary edge map (Uint8Array: 255=edge, 0=not).
-   * Uses automatic threshold based on gradient statistics.
+   *
+   * Pipeline:
+   *  1. Sobel gradient magnitude (|gx| + |gy|)
+   *  2. Clamp extreme magnitudes so text edges don't dominate Otsu
+   *  3. Otsu on clamped histogram with proportional floor + 0.8× relaxation
+   *  4. Morphological closing (bridge gaps) then opening (remove dots/text)
    */
   DocumentDetector.prototype._sobelEdges = function (gray, w, h) {
     var mag = new Uint16Array(w * h);
     var maxMag = 0;
 
-    // Compute Sobel gradient magnitude
+    // 1. Compute Sobel gradient magnitude
     for (var y = 1; y < h - 1; y++) {
       for (var x = 1; x < w - 1; x++) {
         var gx = -gray[(y-1)*w+(x-1)] - 2*gray[y*w+(x-1)] - gray[(y+1)*w+(x-1)]
                 + gray[(y-1)*w+(x+1)] + 2*gray[y*w+(x+1)] + gray[(y+1)*w+(x+1)];
         var gy = -gray[(y-1)*w+(x-1)] - 2*gray[(y-1)*w+x] - gray[(y-1)*w+(x+1)]
                 + gray[(y+1)*w+(x-1)] + 2*gray[(y+1)*w+x] + gray[(y+1)*w+(x+1)];
-        // Fast magnitude approximation: |gx| + |gy| (avoids sqrt)
         var m = (gx < 0 ? -gx : gx) + (gy < 0 ? -gy : gy);
         mag[y * w + x] = m;
         if (m > maxMag) maxMag = m;
       }
     }
 
-    // Automatic threshold: use Otsu's method on gradient histogram
-    var threshold = this._otsuThreshold(mag, w, h, maxMag);
-    // Ensure minimum threshold to filter noise and weak edges
-    if (threshold < 60) threshold = 60;
+    // 2. Clamp extreme magnitudes so text/high-contrast edges don't skew Otsu
+    var clampVal = 800;
 
+    // 3. ROI-limited Otsu on center band where document border is expected
+    //    Avoids strong hand/background edges dominating the threshold
+    var margin = Math.round(w * 0.1);
+    var roi = { x0: margin, y0: margin, x1: w - margin - 1, y1: h - margin - 1 };
+    var threshold = this._otsuThresholdROI(mag, w, h, clampVal, roi);
+    threshold *= 0.6;  // permissive — keep weak border edges
+
+    // 4. Binarize
     var edges = new Uint8Array(w * h);
     for (var i = 0; i < w * h; i++) {
       edges[i] = mag[i] >= threshold ? 255 : 0;
     }
+
+    // 5. Gentle morphology: closing only (bridge gaps), soft erosion
+    edges = this._dilate3x3(edges, w, h);
+    edges = this._erode3x3Soft(edges, w, h);
+
     // Cache for debug visualization
     this._lastSobelMag = mag;
     this._lastSobelMaxMag = maxMag;
@@ -535,31 +572,144 @@
   };
 
   /**
-   * @private - Otsu's threshold on gradient magnitudes.
-   * Finds the threshold that maximizes between-class variance.
+   * @private - Otsu threshold on gradient magnitudes, clamped to maxVal.
+   * Values above clampVal are binned into the top bucket so extreme
+   * text edges don't dominate the between-class variance.
    */
-  DocumentDetector.prototype._otsuThreshold = function (mag, w, h, maxVal) {
-    if (maxVal <= 0) return 0;
+  DocumentDetector.prototype._otsuThresholdClamped = function (mag, w, h, clampVal) {
     var numBins = 256;
-    var binScale = (numBins - 1) / maxVal;
+    var binScale = (numBins - 1) / clampVal;
     var hist = new Int32Array(numBins);
+    var total = 0;
 
     for (var i = 0; i < w * h; i++) {
-      var bin = Math.min(numBins - 1, (mag[i] * binScale) | 0);
+      var v = mag[i];
+      if (v <= 0) continue; // skip zero-gradient border pixels
+      var bin = Math.min(numBins - 1, (Math.min(v, clampVal) * binScale) | 0);
       hist[bin]++;
+      total++;
     }
 
-    var total = w * h;
+    if (total === 0) return 0;
+
     var sumAll = 0;
     for (var i = 0; i < numBins; i++) sumAll += i * hist[i];
 
-    var wB = 0, wF = 0, sumB = 0;
+    var wB = 0, sumB = 0;
     var maxVariance = 0, bestThresh = 0;
 
     for (var t = 0; t < numBins; t++) {
       wB += hist[t];
       if (wB === 0) continue;
-      wF = total - wB;
+      var wF = total - wB;
+      if (wF === 0) break;
+
+      sumB += t * hist[t];
+      var mB = sumB / wB;
+      var mF = (sumAll - sumB) / wF;
+      var diff = mB - mF;
+      var variance = wB * wF * diff * diff;
+
+      if (variance > maxVariance) {
+        maxVariance = variance;
+        bestThresh = t;
+      }
+    }
+
+    // Map bin index back to gradient scale
+    return bestThresh / binScale;
+  };
+
+  /** @private - 3×3 binary morphological dilation (any neighbor = 255 → 255) */
+  DocumentDetector.prototype._dilate3x3 = function (bin, w, h) {
+    var out = new Uint8Array(w * h);
+    for (var y = 1; y < h - 1; y++) {
+      for (var x = 1; x < w - 1; x++) {
+        if (bin[(y-1)*w+(x-1)] || bin[(y-1)*w+x] || bin[(y-1)*w+(x+1)] ||
+            bin[y*w+(x-1)]     || bin[y*w+x]     || bin[y*w+(x+1)] ||
+            bin[(y+1)*w+(x-1)] || bin[(y+1)*w+x] || bin[(y+1)*w+(x+1)]) {
+          out[y * w + x] = 255;
+        }
+      }
+    }
+    return out;
+  };
+
+  /** @private - 3×3 binary morphological erosion (all neighbors must be 255) */
+  DocumentDetector.prototype._erode3x3 = function (bin, w, h) {
+    var out = new Uint8Array(w * h);
+    for (var y = 1; y < h - 1; y++) {
+      for (var x = 1; x < w - 1; x++) {
+        if (bin[(y-1)*w+(x-1)] && bin[(y-1)*w+x] && bin[(y-1)*w+(x+1)] &&
+            bin[y*w+(x-1)]     && bin[y*w+x]     && bin[y*w+(x+1)] &&
+            bin[(y+1)*w+(x-1)] && bin[(y+1)*w+x] && bin[(y+1)*w+(x+1)]) {
+          out[y * w + x] = 255;
+        }
+      }
+    }
+    return out;
+  };
+
+  /** @private - Morphological closing: dilate then erode. Bridges small gaps. */
+  DocumentDetector.prototype._morphClose3x3 = function (bin, w, h) {
+    return this._erode3x3(this._dilate3x3(bin, w, h), w, h);
+  };
+
+  /** @private - Morphological opening: erode then dilate. Removes small fragments. */
+  DocumentDetector.prototype._morphOpen3x3 = function (bin, w, h) {
+    return this._dilate3x3(this._erode3x3(bin, w, h), w, h);
+  };
+
+  /** @private - Soft 3×3 erosion: keep pixel if >=5 of 9 neighbors are set (majority) */
+  DocumentDetector.prototype._erode3x3Soft = function (bin, w, h) {
+    var out = new Uint8Array(w * h);
+    for (var y = 1; y < h - 1; y++) {
+      for (var x = 1; x < w - 1; x++) {
+        var count = 0;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            if (bin[(y + dy) * w + (x + dx)]) count++;
+          }
+        }
+        if (count >= 5) out[y * w + x] = 255;
+      }
+    }
+    return out;
+  };
+
+  /**
+   * @private - Otsu threshold on ROI of gradient magnitudes, clamped.
+   * Only pixels inside roi contribute to the histogram, reducing
+   * influence of strong hand/background edges outside the document area.
+   */
+  DocumentDetector.prototype._otsuThresholdROI = function (mag, w, h, clampVal, roi) {
+    var numBins = 256;
+    var binScale = (numBins - 1) / clampVal;
+    var hist = new Int32Array(numBins);
+    var total = 0;
+
+    for (var y = roi.y0; y <= roi.y1; y++) {
+      for (var x = roi.x0; x <= roi.x1; x++) {
+        var v = mag[y * w + x];
+        if (v <= 0) continue;
+        var bin = Math.min(numBins - 1, (Math.min(v, clampVal) * binScale) | 0);
+        hist[bin]++;
+        total++;
+      }
+    }
+
+    if (total === 0) return 0;
+
+    var sumAll = 0;
+    for (var i = 0; i < numBins; i++) sumAll += i * hist[i];
+
+    var wB = 0, sumB = 0;
+    var maxVariance = 0, bestThresh = 0;
+
+    for (var t = 0; t < numBins; t++) {
+      wB += hist[t];
+      if (wB === 0) continue;
+      var wF = total - wB;
       if (wF === 0) break;
 
       sumB += t * hist[t];
@@ -604,10 +754,9 @@
     }
 
     // Find peaks: dynamic threshold based on expected document size
-    // Expected card width = frame width * minWidthFraction (e.g., 40%)
-    // minLineLen = 30% of expected card width
+    // Threshold = 20% of expected card width — low enough for short sides
     var expectedCardWidth = w * this._minWidthFraction;
-    var minLineLen = Math.max(20, expectedCardWidth * 0.3);
+    var minLineLen = 25;
     var peaks = [];
     for (var ai = 0; ai < numAngles; ai++) {
       for (var ri = 0; ri < numRho; ri++) {
@@ -618,7 +767,7 @@
       }
     }
 
-    // Sort by votes descending
+    // Sort by raw votes descending
     peaks.sort(function (a, b) { return b.votes - a.votes; });
 
     // Non-maximum suppression: merge nearby lines
@@ -643,7 +792,183 @@
       }
     }
 
+    // Parallel twin weighting + orientation-balanced selection
+    lines = this._boostAndBalanceLines(lines);
+
     return lines;
+  };
+
+  /**
+   * @private - Ensure previously trusted lines are present in the current set.
+   * Re-inserts known lines if no current line is close enough to them.
+   * Prevents flickering when a border line temporarily loses Hough votes.
+   */
+  DocumentDetector.prototype._protectKnownLines = function (lines, knownLines) {
+    var rhoTol = 10;
+    var thetaTol = 3 * Math.PI / 180; // ~3 degrees
+    var result = lines.slice();
+    var added = 0;
+
+    for (var k = 0; k < knownLines.length && added < 4; k++) {
+      var kl = knownLines[k];
+      var found = false;
+      for (var i = 0; i < result.length; i++) {
+        var dTheta = Math.abs(result[i].theta - kl.theta);
+        if (dTheta > Math.PI / 2) dTheta = Math.PI - dTheta;
+        var dRho = Math.abs(result[i].rho - kl.rho);
+        if (dTheta <= thetaTol && dRho <= rhoTol) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        // Re-insert with preserved votes and family tag
+        result.push({
+          rho: kl.rho,
+          theta: kl.theta,
+          votes: kl.votes || 1,
+          effVotes: kl.effVotes || kl.votes || 1,
+          _family: kl._family || null,
+          _protected: true,
+        });
+        added++;
+      }
+    }
+
+    if (added > 0) {
+      result.sort(function (a, b) { return (b.effVotes || b.votes) - (a.effVotes || a.votes); });
+    }
+
+    return result;
+  };
+
+  /**
+   * @private - Boost and balance lines using relative angle clusters.
+   *
+   * Instead of absolute H/V buckets, finds the two dominant perpendicular
+   * angle families from the lines themselves. The weaker family gets boosted
+   * so short document edges compete with long ones regardless of rotation.
+   *
+   * - rawVotes used for accept/reject (threshold already applied above)
+   * - effVotes (boosted) used only for sorting/ranking
+   * - Reserved slots: up to 6 per family, rest filled by score
+   */
+  DocumentDetector.prototype._boostAndBalanceLines = function (lines) {
+    if (lines.length < 2) return lines;
+
+    // --- Step 1: build angle histogram to find dominant clusters ---
+    var dTheta = 2 * Math.PI / 180; // 2-degree bin width
+    var numBins = Math.ceil(Math.PI / dTheta);
+    var binVotes = new Float32Array(numBins); // vote-weighted histogram
+    var binCounts = new Uint8Array(numBins);
+    var binIndices = new Array(lines.length);
+
+    for (var i = 0; i < lines.length; i++) {
+      var idx = Math.round((lines[i].theta + Math.PI / 2) / dTheta);
+      if (idx < 0) idx = 0;
+      if (idx >= numBins) idx = numBins - 1;
+      binIndices[i] = idx;
+      binVotes[idx] += lines[i].votes;
+      binCounts[idx]++;
+    }
+
+    // Smooth histogram (±1 bin) for cluster detection
+    var smoothVotes = new Float32Array(numBins);
+    var smoothCounts = new Uint8Array(numBins);
+    for (var b = 0; b < numBins; b++) {
+      smoothVotes[b] = binVotes[b];
+      smoothCounts[b] = binCounts[b];
+      if (b > 0) { smoothVotes[b] += binVotes[b - 1]; smoothCounts[b] += binCounts[b - 1]; }
+      if (b < numBins - 1) { smoothVotes[b] += binVotes[b + 1]; smoothCounts[b] += binCounts[b + 1]; }
+    }
+
+    // --- Step 2: find top two perpendicular angle peaks ---
+    // Peak 1: highest vote-weighted bin
+    var peak1Bin = 0;
+    for (var b = 1; b < numBins; b++) {
+      if (smoothVotes[b] > smoothVotes[peak1Bin]) peak1Bin = b;
+    }
+
+    // Peak 2: highest vote-weighted bin that's roughly perpendicular to peak1 (80-100°)
+    var perpBinDist = Math.round(90 / (dTheta * 180 / Math.PI)); // ~45 bins for 2° width
+    var perpTolBins = Math.round(10 / (dTheta * 180 / Math.PI)); // ±10° tolerance
+    var peak2Bin = -1;
+    var peak2Score = 0;
+    for (var b = 0; b < numBins; b++) {
+      var dist = Math.abs(b - peak1Bin);
+      if (dist > numBins / 2) dist = numBins - dist; // wrap
+      if (dist >= perpBinDist - perpTolBins && dist <= perpBinDist + perpTolBins) {
+        if (smoothVotes[b] > peak2Score) {
+          peak2Score = smoothVotes[b];
+          peak2Bin = b;
+        }
+      }
+    }
+
+    // --- Step 3: classify lines into family A (peak1) and family B (peak2) ---
+    var clusterTolBins = Math.round(15 / (dTheta * 180 / Math.PI)); // ±15° membership
+    var familyA = []; // dominant (usually long sides)
+    var familyB = []; // secondary (usually short sides)
+    var other = [];
+
+    for (var i = 0; i < lines.length; i++) {
+      var bin = binIndices[i];
+      var distA = Math.abs(bin - peak1Bin);
+      if (distA > numBins / 2) distA = numBins - distA;
+      var distB = peak2Bin >= 0 ? Math.abs(bin - peak2Bin) : 9999;
+      if (distB > numBins / 2) distB = numBins - distB;
+
+      if (distA <= clusterTolBins) {
+        lines[i]._family = 'A';
+        familyA.push(lines[i]);
+      } else if (distB <= clusterTolBins) {
+        lines[i]._family = 'B';
+        familyB.push(lines[i]);
+      } else {
+        lines[i]._family = null;
+        other.push(lines[i]);
+      }
+    }
+
+    // --- Step 4: compute effVotes with relative boosting ---
+    // Boost the weaker family so short sides compete
+    var boostFactor = 1.5; // parallel cluster boost
+    var weakBoost = 1.8;   // extra boost for the weaker family
+    var totalA = 0, totalB = 0;
+    for (var i = 0; i < familyA.length; i++) totalA += familyA[i].votes;
+    for (var i = 0; i < familyB.length; i++) totalB += familyB[i].votes;
+    var weakFamily = totalA <= totalB ? 'A' : 'B';
+
+    for (var i = 0; i < lines.length; i++) {
+      var base = lines[i].votes;
+      var parallelMul = smoothCounts[binIndices[i]] >= 2 ? boostFactor : 1.0;
+      var orientMul = lines[i]._family === weakFamily ? weakBoost : 1.0;
+      lines[i].effVotes = base * parallelMul * orientMul;
+    }
+
+    // --- Step 5: balanced selection with reserved slots per family ---
+    var maxPerFamily = 6;
+    familyA.sort(function (a, b) { return b.effVotes - a.effVotes; });
+    familyB.sort(function (a, b) { return b.effVotes - a.effVotes; });
+
+    var result = [];
+    var used = {};
+    var addLine = function (l) {
+      var key = l.rho + '_' + l.theta;
+      if (!used[key]) { result.push(l); used[key] = true; }
+    };
+
+    for (var i = 0; i < familyA.length && i < maxPerFamily; i++) addLine(familyA[i]);
+    for (var i = 0; i < familyB.length && i < maxPerFamily; i++) addLine(familyB[i]);
+
+    // Fill remaining by effVotes from all lines
+    lines.sort(function (a, b) { return b.effVotes - a.effVotes; });
+    for (var i = 0; i < lines.length && result.length < 40; i++) addLine(lines[i]);
+
+    // Final sort by effVotes
+    result.sort(function (a, b) { return b.effVotes - a.effVotes; });
+
+    return result;
   };
 
   /**
@@ -662,18 +987,24 @@
     var frameArea = pw * ph;
     var DEG = Math.PI / 180;
 
-    // Classify lines into ~horizontal and ~vertical.
-    // Boundary at exactly 45° / 135° with no gap so documents rotated up to
-    // ±45° from landscape always have their edges classified into one bucket.
+    // Classify lines into two families using _family tags from _boostAndBalanceLines.
+    // Falls back to absolute 45°/135° if no family tags are present.
     var hLines = [];
     var vLines = [];
 
     for (var i = 0; i < lines.length; i++) {
-      var angleDeg = lines[i].theta * 180 / Math.PI;
-      if (angleDeg > 45 && angleDeg < 135) {
+      if (lines[i]._family === 'A') {
         hLines.push(lines[i]);
-      } else {
+      } else if (lines[i]._family === 'B') {
         vLines.push(lines[i]);
+      } else {
+        // Untagged lines: use absolute angle as fallback
+        var angleDeg = lines[i].theta * 180 / Math.PI;
+        if (angleDeg > 45 && angleDeg < 135) {
+          hLines.push(lines[i]);
+        } else {
+          vLines.push(lines[i]);
+        }
       }
     }
 
@@ -910,6 +1241,7 @@
                   bottomRightCorner: { x: sorted[2].x * invScale, y: sorted[2].y * invScale },
                   bottomLeftCorner:  { x: sorted[3].x * invScale, y: sorted[3].y * invScale },
                 },
+                _lines: [h1, h2, v1, v2],
               };
             }
           }
@@ -1829,25 +2161,48 @@
       this._debugDataForHough = (layer === 'hough') ? d : null;
     }
 
-    /** @private - Draw top 10 Hough lines with vote-based color gradient */
+    /**
+     * @private - Draw Hough lines with vote-based color gradient.
+     * Shows up to 20 lines. H-lines = solid, V-lines = dashed.
+     * Color: red (weak) → green (strong) based on effVotes.
+     * Labels: "raw→eff" when boosted, "raw" otherwise. H/V tag appended.
+     */
     _drawHoughLines(ctx, data) {
       var lines = data.lines;
       var pw = data.pw, ph = data.ph;
       if (!lines || lines.length === 0) return;
 
-      var top = lines.slice(0, 10);
-      var maxVotes = top[0].votes;
-      var minVotes = top[top.length - 1].votes;
-      var range = maxVotes - minVotes || 1;
+      // Split into family A and B, take top 6 of each by effVotes
+      var getScore = function(l) { return l.effVotes != null ? l.effVotes : l.votes; };
+      var famA = [], famB = [], famO = [];
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i]._family === 'A') famA.push(lines[i]);
+        else if (lines[i]._family === 'B') famB.push(lines[i]);
+        else famO.push(lines[i]);
+      }
+      famA.sort(function(a, b) { return getScore(b) - getScore(a); });
+      famB.sort(function(a, b) { return getScore(b) - getScore(a); });
+      famO.sort(function(a, b) { return getScore(b) - getScore(a); });
+      var top = famA.slice(0, 6).concat(famB.slice(0, 6)).concat(famO.slice(0, 2));
+
+      var maxScore = 0, minScore = Infinity;
+      for (var i = 0; i < top.length; i++) {
+        var s = getScore(top[i]);
+        if (s > maxScore) maxScore = s;
+        if (s < minScore) minScore = s;
+      }
+      var range = maxScore - minScore || 1;
 
       ctx.lineWidth = 1.5;
 
       for (var i = 0; i < top.length; i++) {
         var line = top[i];
-        var t = (line.votes - minVotes) / range;
+        var isA = line._family === 'A';
+        var t = (getScore(line) - minScore) / range;
         var hue = Math.round(t * 120);  // 0=red, 120=green
         ctx.strokeStyle = 'hsl(' + hue + ', 100%, 50%)';
         ctx.globalAlpha = 0.5 + 0.5 * t;
+        ctx.setLineDash(isA ? [] : [4, 3]); // solid=A(dominant), dashed=B(weak)
 
         var cosT = Math.cos(line.theta);
         var sinT = Math.sin(line.theta);
@@ -1871,6 +2226,7 @@
         ctx.stroke();
       }
 
+      ctx.setLineDash([]);
       ctx.globalAlpha = 1.0;
 
       // Vote count labels
@@ -1878,7 +2234,7 @@
       ctx.textBaseline = 'top';
       for (var i = 0; i < top.length; i++) {
         var line = top[i];
-        var t = (line.votes - minVotes) / range;
+        var t = (getScore(line) - minScore) / range;
         var hue = Math.round(t * 120);
         var cosT = Math.cos(line.theta);
         var sinT = Math.sin(line.theta);
@@ -1886,7 +2242,12 @@
         var my = Math.abs(sinT) > 0.001 ? (line.rho - mx * cosT) / sinT : ph / 2;
         if (my < 0 || my > ph) { mx = 0; my = Math.abs(sinT) > 0.001 ? line.rho / sinT : 0; }
         ctx.fillStyle = 'hsl(' + hue + ', 100%, 70%)';
-        ctx.fillText(line.votes + '', mx + 2, my + 2);
+        var label = line.votes + '';
+        if (line.effVotes != null && line.effVotes !== line.votes) {
+          label += '→' + Math.round(line.effVotes);
+        }
+        label += line._family ? ' ' + line._family : ' ?';
+        ctx.fillText(label, mx + 2, my + 2);
       }
     }
 
