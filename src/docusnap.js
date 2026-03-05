@@ -1381,10 +1381,10 @@
             var vSep = Math.min(vDist / (pw * 0.6), 1.0);
             var outerScore = (hSep + vSep) / 2;
 
-            var score = edgeSupport * 0.35
+            var score = edgeSupport * 0.40
                       + aspectScore * 0.20
                       + areaScore   * 0.15
-                      + centerScore * 0.15
+                      + centerScore * 0.10
                       + outerScore  * 0.15;
 
             // Tracking proximity bonus: when we have known lines from a
@@ -1471,8 +1471,8 @@
     ];
 
     var minSupport = 1.0;
-    var totalSupport = 0;
     var maxGapPenalty = 0;
+    var sideSupports = [0, 0, 0, 0];
 
     for (var si = 0; si < 4; si++) {
       var p1 = sides[si][0], p2 = sides[si][1];
@@ -1511,26 +1511,29 @@
         }
       }
 
-      var sideSupport = supported / (numSamples + 1);
-      minSupport = Math.min(minSupport, sideSupport);
-      totalSupport += sideSupport;
+      sideSupports[si] = supported / (numSamples + 1);
+      minSupport = Math.min(minSupport, sideSupports[si]);
 
       // Track worst gap across all sides (as fraction of side length)
       var gapFraction = maxGap / (numSamples + 1);
       if (gapFraction > maxGapPenalty) maxGapPenalty = gapFraction;
     }
 
-    // Return average support, but penalize if any side is weak or has large gaps
-    var avgSupport = totalSupport / 4;
-    var baseScore = minSupport < minSupportRequired ? minSupport : avgSupport;
-    
+    // Weighted average: horizontal sides (top=0, bottom=2) are the reliable
+    // anchor — weight them 2× vs vertical sides (right=1, left=3).
+    // H-lines on an ID are longer and more consistently detected.
+    var wH = 2.0, wV = 1.0;
+    var weightedSupport = (sideSupports[0] * wH + sideSupports[1] * wV
+                         + sideSupports[2] * wH + sideSupports[3] * wV)
+                         / (2 * wH + 2 * wV);
+    var baseScore = minSupport < minSupportRequired ? minSupport : weightedSupport;
+
     // Apply mild gap penalty only for very large gaps
-    // (Tightness preference handles false edges better than gap penalty)
     if (maxGapPenalty > maxGapFraction) {
       var gapPenalty = (maxGapPenalty - maxGapFraction) / (1.0 - maxGapFraction);
-      baseScore *= (1.0 - gapPenalty * 0.25);  // Reduced: up to 25% penalty for severe gaps
+      baseScore *= (1.0 - gapPenalty * 0.25);
     }
-    
+
     return baseScore;
   };
 
