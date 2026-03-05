@@ -366,12 +366,28 @@
     if (this.debug && !best) console.warn('[docuSnap] KILLED: no valid quad found (see individual rejections above)');
 
     // 7. Update known lines cache from successful detection
-    if (best && best._lines) {
-      this._knownLines = best._lines.slice();
+    //    Gate: only track lines that form geometrically valid parallel pairs.
+    //    This prevents a stray hand/desk line from polluting the tracker.
+    if (best && best._lines && best.confidence >= 0.20) {
+      var _tl = best._lines;
+      var DEG = Math.PI / 180;
+      // h-pair (indices 0,1) must be roughly parallel
+      var hAngDiff = Math.abs(_tl[0].theta - _tl[1].theta);
+      // v-pair (indices 2,3) must be roughly parallel
+      var vAngDiff = Math.abs(_tl[2].theta - _tl[3].theta);
+      if (vAngDiff > Math.PI / 2) vAngDiff = Math.PI - vAngDiff;
+      // Also check h vs v are roughly perpendicular (70-110° apart)
+      var hvAng = Math.abs(_tl[0].theta - _tl[2].theta);
+      if (hvAng > Math.PI / 2) hvAng = Math.PI - hvAng;
+
+      if (hAngDiff < 15 * DEG && vAngDiff < 15 * DEG && hvAng > 50 * DEG) {
+        this._knownLines = _tl.slice();
+      }
+      // else: detection passed but lines aren't geometrically clean — don't track
     } else if (!best) {
       // Decay: clear after N misses to avoid stale tracking
       this._knownLinesMisses = (this._knownLinesMisses || 0) + 1;
-      if (this._knownLinesMisses > 10) {
+      if (this._knownLinesMisses > 5) {
         this._knownLines = null;
         this._knownLinesMisses = 0;
       }
