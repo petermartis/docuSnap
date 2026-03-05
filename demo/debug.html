@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>docuSnap — Detection Pipeline Debug</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #fff;
+      min-height: 100dvh;
+    }
+    .page { max-width: 900px; margin: 0 auto; padding: 10px; }
+    h1 { text-align: center; margin-bottom: 10px; color: #00d9ff; font-size: 1.3em; }
+
+    .controls {
+      display: flex; gap: 10px; align-items: center;
+      justify-content: center; flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .controls label { font-size: 0.9em; color: #aaa; }
+    .controls select, .controls button {
+      padding: 8px 14px; border-radius: 8px; border: 1px solid #334;
+      background: #16213e; color: #fff; font-size: 1em;
+    }
+    .controls button {
+      background: #00d9ff; color: #000; font-weight: 600;
+      cursor: pointer; border: none;
+    }
+    .controls button:disabled { opacity: 0.4; cursor: default; }
+    .controls button.stop { background: #ff4444; color: #fff; }
+
+    .canvas-wrap {
+      position: relative; width: 100%;
+      background: #000; border-radius: 12px; overflow: hidden;
+      aspect-ratio: 4/3;
+    }
+    video, canvas {
+      position: absolute; top: 0; left: 0;
+      width: 100%; height: 100%; object-fit: contain;
+    }
+    video { display: none; }
+
+    .info {
+      margin-top: 10px; padding: 10px;
+      background: #16213e; border-radius: 8px;
+      font-size: 0.85em; color: #aaa;
+      line-height: 1.6;
+    }
+    .info strong { color: #00d9ff; }
+    a { color: #00d9ff; }
+  </style>
+</head>
+<body>
+<div class="page">
+  <h1>Detection Pipeline Debug</h1>
+
+  <div class="controls">
+    <button id="startBtn" onclick="startCamera()">Start Camera</button>
+    <button id="stopBtn" onclick="stopCamera()" class="stop" disabled>Stop</button>
+    <label>Layer:
+      <select id="layerSelect" onchange="onLayerChange()">
+        <option value="normal">Normal</option>
+        <option value="blur">Gaussian Blur</option>
+        <option value="sobel">Sobel Gradients</option>
+        <option value="otsu">Otsu Threshold</option>
+        <option value="hough">Hough Lines</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="canvas-wrap">
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div class="info">
+    <strong>Pipeline order:</strong> Gaussian Blur &rarr; Sobel Gradients &rarr; Otsu Threshold &rarr; Hough Lines<br>
+    <strong>Hough line colors:</strong> Red = weak votes &rarr; Green = strong votes<br>
+    <a href="index.html">&larr; Back to main demo</a>
+  </div>
+</div>
+
+<script src="../src/docusnap.js?v=7"></script>
+<script>
+var video  = document.getElementById('video');
+var canvas = document.getElementById('canvas');
+var snap   = null;
+var stream = null;
+
+async function startCamera() {
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('stopBtn').disabled  = false;
+
+  snap = new DocuSnap({
+    documentType: 'any',
+    captureMode:  'manual',
+    sides:        1,
+    quality:      { sharpness: 0, brightness: 0, glare: 100, docSize: 0 },
+    face:         'off',
+    onFrame:      function() {},
+    onCapture:    function() {},
+    onError:      function(e) { console.error(e); },
+  });
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    await snap.start(video, canvas);
+    onLayerChange();
+  } catch (err) {
+    console.error('Camera error:', err);
+    alert('Camera unavailable: ' + err.message);
+    document.getElementById('startBtn').disabled = false;
+    document.getElementById('stopBtn').disabled  = true;
+  }
+}
+
+function stopCamera() {
+  if (snap)   { snap.destroy(); snap = null; }
+  if (stream) { stream.getTracks().forEach(function(t) { t.stop(); }); stream = null; }
+  video.srcObject = null;
+  var ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('stopBtn').disabled  = true;
+}
+
+function onLayerChange() {
+  var layer = document.getElementById('layerSelect').value;
+  if (snap) snap.setDebugLayer(layer);
+}
+</script>
+</body>
+</html>

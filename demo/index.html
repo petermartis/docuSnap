@@ -1091,6 +1091,8 @@ async function startCapture(forceFile) {
       await snap.start(null, null);
     }
   }
+
+  // Apply saved debug layer (live, no restart needed)
 }
 
 function destroySnap() {
@@ -2078,7 +2080,7 @@ async function sendToGuru() {
         'anthropic-dangerous-direct-browser-access': 'true',
       },
       body: JSON.stringify({
-        model:      'claude-sonnet-4-6-20250514',
+        model:      'claude-sonnet-4-6',
         max_tokens: 1024,
         temperature: 0.1,
         system:     GURU_SYSTEM_PROMPT,

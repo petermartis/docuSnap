@@ -285,6 +285,11 @@
     this._sinTable = null;
     this._cosTable = null;
     this._numAngles = 180;
+    // Debug visualization
+    this._debugLayer = 'normal';  // 'normal'|'blur'|'sobel'|'otsu'|'hough'
+    this._debugData = null;       // Cached pipeline intermediates
+    this._lastSobelMag = null;
+    this._lastSobelMaxMag = 0;
   }
 
   /** Initialize Hough lookup tables. */
@@ -331,8 +336,8 @@
       }
     }
 
-    // 2. Fast 3x3 Gaussian blur
-    var blurred = this._gaussianBlur3x3(gray, pw, ph);
+    // 2. Gaussian blur
+    var blurred = this._gaussianBlur5x5(gray, pw, ph);
 
     // 3. Sobel edge detection with gradient magnitude
     var edges = this._sobelEdges(blurred, pw, ph);
@@ -350,6 +355,18 @@
     // 6. Find rectangle from line intersections (pass edges for support scoring)
     var best = this._findRectangleFromLines(lines, pw, ph, scale, edges);
     if (this.debug && !best) console.warn('[docuSnap] KILLED: no valid quad found (see individual rejections above)');
+
+    // Cache pipeline intermediates for debug visualization
+    if (this._debugLayer !== 'normal') {
+      this._debugData = {
+        pw: pw, ph: ph,
+        blurred: blurred,
+        sobelMag: this._lastSobelMag,
+        sobelMaxMag: this._lastSobelMaxMag,
+        edges: edges,
+        lines: lines,
+      };
+    }
 
     return best;
   };
@@ -431,6 +448,35 @@
     }
   };
 
+  /** @private - 5x5 Gaussian blur (sigma ~1.0) */
+  DocumentDetector.prototype._gaussianBlur5x5 = function (gray, w, h) {
+    var out = new Uint8Array(w * h);
+    // Kernel (sum=256, shift >>8):
+    // [ 1,  4,  6,  4, 1]
+    // [ 4, 16, 24, 16, 4]
+    // [ 6, 24, 36, 24, 6]
+    // [ 4, 16, 24, 16, 4]
+    // [ 1,  4,  6,  4, 1]
+    for (var y = 2; y < h - 2; y++) {
+      for (var x = 2; x < w - 2; x++) {
+        var val =
+              gray[(y-2)*w+(x-2)]      + 4*gray[(y-2)*w+(x-1)]  + 6*gray[(y-2)*w+x]    + 4*gray[(y-2)*w+(x+1)]  +   gray[(y-2)*w+(x+2)]
+          + 4*gray[(y-1)*w+(x-2)]  + 16*gray[(y-1)*w+(x-1)] + 24*gray[(y-1)*w+x]   + 16*gray[(y-1)*w+(x+1)] + 4*gray[(y-1)*w+(x+2)]
+          + 6*gray[y*w+(x-2)]     + 24*gray[y*w+(x-1)]      + 36*gray[y*w+x]       + 24*gray[y*w+(x+1)]     + 6*gray[y*w+(x+2)]
+          + 4*gray[(y+1)*w+(x-2)] + 16*gray[(y+1)*w+(x-1)]  + 24*gray[(y+1)*w+x]   + 16*gray[(y+1)*w+(x+1)] + 4*gray[(y+1)*w+(x+2)]
+          +   gray[(y+2)*w+(x-2)]  + 4*gray[(y+2)*w+(x-1)]  + 6*gray[(y+2)*w+x]    + 4*gray[(y+2)*w+(x+1)]  +   gray[(y+2)*w+(x+2)];
+        out[y * w + x] = (val + 128) >> 8;
+      }
+    }
+    // Copy border pixels (2px border)
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        if (y < 2 || y >= h - 2 || x < 2 || x >= w - 2) out[y * w + x] = gray[y * w + x];
+      }
+    }
+    return out;
+  };
+
   /** @private - Fast 3x3 Gaussian blur (sigma ~0.85) */
   DocumentDetector.prototype._gaussianBlur3x3 = function (gray, w, h) {
     var out = new Uint8Array(w * h);
@@ -482,6 +528,9 @@
     for (var i = 0; i < w * h; i++) {
       edges[i] = mag[i] >= threshold ? 255 : 0;
     }
+    // Cache for debug visualization
+    this._lastSobelMag = mag;
+    this._lastSobelMaxMag = maxMag;
     return edges;
   };
 
@@ -556,9 +605,9 @@
 
     // Find peaks: dynamic threshold based on expected document size
     // Expected card width = frame width * minWidthFraction (e.g., 40%)
-    // minLineLen = 50% of expected card width
+    // minLineLen = 30% of expected card width
     var expectedCardWidth = w * this._minWidthFraction;
-    var minLineLen = Math.max(20, expectedCardWidth * 0.5);
+    var minLineLen = Math.max(20, expectedCardWidth * 0.3);
     var peaks = [];
     for (var ai = 0; ai < numAngles; ai++) {
       for (var ri = 0; ri < numRho; ri++) {
@@ -1616,6 +1665,11 @@
       this._lastEvalTime = 0;
       this._evaluating = false;
 
+      // Debug visualization state
+      this._debugImageDataSmall = null;  // ImageData at processing resolution
+      this._debugDataForHough = null;    // Hough data for line drawing
+      this._debugCanvas = null;          // Offscreen canvas for upscaling
+
       // Bounding box smoothing state
       this._stableCorners = null;        // Ground truth corners (validated, display space)
       this._stableFullCorners = null;    // Ground truth corners (full video resolution)
@@ -1655,6 +1709,8 @@
       this._frameBuffer = [];
       this._lastGoodCorners = null;
       this._evaluating = false;
+      this._debugImageDataSmall = null;
+      this._debugDataForHough = null;
       this._stableCorners = null;
       this._stableFullCorners = null;
       this._displayCorners = null;
@@ -1718,6 +1774,120 @@
     reset() {
       this.stop();
       this.start();
+    }
+
+    /** Set the active debug visualization layer.
+     *  @param {string} layer - 'normal'|'blur'|'sobel'|'otsu'|'hough'
+     */
+    setDebugLayer(layer) {
+      this._scanner._detector._debugLayer = layer || 'normal';
+      if (layer === 'normal') {
+        this._debugImageDataSmall = null;
+        this._debugDataForHough = null;
+        this._scanner._detector._debugData = null;
+      }
+    }
+
+    /** @private - Build RGBA ImageData from the current debug layer */
+    _updateDebugImageData() {
+      var detector = this._scanner._detector;
+      if (detector._debugLayer === 'normal' || !detector._debugData) {
+        this._debugImageDataSmall = null;
+        this._debugDataForHough = null;
+        return;
+      }
+      var d = detector._debugData;
+      var pw = d.pw, ph = d.ph;
+      var layer = detector._debugLayer;
+      var rgba = new Uint8ClampedArray(pw * ph * 4);
+
+      if (layer === 'blur') {
+        for (var i = 0; i < pw * ph; i++) {
+          var v = d.blurred[i];
+          rgba[i * 4] = v; rgba[i * 4 + 1] = v; rgba[i * 4 + 2] = v; rgba[i * 4 + 3] = 255;
+        }
+      } else if (layer === 'sobel') {
+        var maxM = d.sobelMaxMag || 1;
+        for (var i = 0; i < pw * ph; i++) {
+          var v = Math.min(255, Math.round(d.sobelMag[i] * 255 / maxM));
+          rgba[i * 4] = v; rgba[i * 4 + 1] = v; rgba[i * 4 + 2] = v; rgba[i * 4 + 3] = 255;
+        }
+      } else if (layer === 'otsu') {
+        for (var i = 0; i < pw * ph; i++) {
+          var v = d.edges[i];
+          rgba[i * 4] = v; rgba[i * 4 + 1] = v; rgba[i * 4 + 2] = v; rgba[i * 4 + 3] = 255;
+        }
+      } else if (layer === 'hough') {
+        // Dim edges as background; lines drawn separately via canvas API
+        for (var i = 0; i < pw * ph; i++) {
+          var v = d.edges[i] ? 40 : 0;
+          rgba[i * 4] = v; rgba[i * 4 + 1] = v; rgba[i * 4 + 2] = v; rgba[i * 4 + 3] = 255;
+        }
+      }
+
+      this._debugImageDataSmall = new ImageData(rgba, pw, ph);
+      this._debugDataForHough = (layer === 'hough') ? d : null;
+    }
+
+    /** @private - Draw top 10 Hough lines with vote-based color gradient */
+    _drawHoughLines(ctx, data) {
+      var lines = data.lines;
+      var pw = data.pw, ph = data.ph;
+      if (!lines || lines.length === 0) return;
+
+      var top = lines.slice(0, 10);
+      var maxVotes = top[0].votes;
+      var minVotes = top[top.length - 1].votes;
+      var range = maxVotes - minVotes || 1;
+
+      ctx.lineWidth = 1.5;
+
+      for (var i = 0; i < top.length; i++) {
+        var line = top[i];
+        var t = (line.votes - minVotes) / range;
+        var hue = Math.round(t * 120);  // 0=red, 120=green
+        ctx.strokeStyle = 'hsl(' + hue + ', 100%, 50%)';
+        ctx.globalAlpha = 0.5 + 0.5 * t;
+
+        var cosT = Math.cos(line.theta);
+        var sinT = Math.sin(line.theta);
+        var x0, y0, x1, y1;
+
+        if (Math.abs(sinT) > 0.001) {
+          x0 = 0;
+          y0 = line.rho / sinT;
+          x1 = pw - 1;
+          y1 = (line.rho - x1 * cosT) / sinT;
+        } else {
+          x0 = line.rho / cosT;
+          y0 = 0;
+          x1 = x0;
+          y1 = ph - 1;
+        }
+
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+      }
+
+      ctx.globalAlpha = 1.0;
+
+      // Vote count labels
+      ctx.font = '9px monospace';
+      ctx.textBaseline = 'top';
+      for (var i = 0; i < top.length; i++) {
+        var line = top[i];
+        var t = (line.votes - minVotes) / range;
+        var hue = Math.round(t * 120);
+        var cosT = Math.cos(line.theta);
+        var sinT = Math.sin(line.theta);
+        var mx = pw / 2;
+        var my = Math.abs(sinT) > 0.001 ? (line.rho - mx * cosT) / sinT : ph / 2;
+        if (my < 0 || my > ph) { mx = 0; my = Math.abs(sinT) > 0.001 ? line.rho / sinT : 0; }
+        ctx.fillStyle = 'hsl(' + hue + ', 100%, 70%)';
+        ctx.fillText(line.votes + '', mx + 2, my + 2);
+      }
     }
 
     /**
@@ -1801,6 +1971,44 @@
       }
 
       var ctx = this._canvas.getContext("2d");
+
+      // ── Debug layer rendering ──────────────────────────────────────────
+      var debugLayer = this._scanner._detector._debugLayer;
+      if (debugLayer !== 'normal' && this._debugImageDataSmall) {
+        var small = this._debugImageDataSmall;
+        if (!this._debugCanvas) this._debugCanvas = document.createElement('canvas');
+        var dc = this._debugCanvas;
+        if (dc.width !== small.width || dc.height !== small.height) {
+          dc.width = small.width;
+          dc.height = small.height;
+        }
+        var dctx = dc.getContext('2d');
+        dctx.putImageData(small, 0, 0);
+        if (debugLayer === 'hough' && this._debugDataForHough) {
+          this._drawHoughLines(dctx, this._debugDataForHough);
+        }
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(dc, 0, 0, dispW, dispH);
+        ctx.imageSmoothingEnabled = true;
+
+        // Still show instruction text in debug mode
+        var fadeSpeed = 0.042;
+        if (this._instructionOpacity < this._instructionFadeTarget) {
+          this._instructionOpacity = Math.min(1, this._instructionOpacity + fadeSpeed);
+        } else if (this._instructionOpacity > this._instructionFadeTarget) {
+          this._instructionOpacity = Math.max(0, this._instructionOpacity - fadeSpeed);
+        }
+        if (this._instructionOpacity < 0.02 && this._pendingInstruction &&
+            this._pendingInstruction !== this._lastInstruction) {
+          this._lastInstruction = this._pendingInstruction;
+          this._instructionFadeTarget = 1;
+        }
+        if (this._instructionOpacity > 0.01 && this._lastInstruction) {
+          this._drawInstruction(ctx, this._lastInstruction, dispW, dispH, this._instructionOpacity);
+        }
+        return;  // skip normal video + spotlight rendering
+      }
+
       ctx.drawImage(this._video, 0, 0, dispW, dispH);
 
       // Convexity guard: bowtie corners from Kalman crossing → reset
@@ -1928,6 +2136,7 @@
 
       // ── Detect + assess at detection resolution ────────────────────────
       var detection  = this._scanner._detector.detect(imageData.data, detW, detH);
+      this._updateDebugImageData();  // build debug viz if active
       var detCorners = detection ? detection.cornerPoints : null;
       var detConfidence = detection ? detection.confidence : 0;
 
@@ -3139,6 +3348,13 @@
     /** Set the instruction text shown on the canvas overlay (with fade animation). */
     setCanvasInstruction(text) {
       if (this._autoCapture) this._autoCapture.setCanvasInstruction(text);
+    }
+
+    /** Set the active debug visualization layer for the detection pipeline.
+     *  @param {string} layer - 'normal'|'blur'|'sobel'|'otsu'|'hough'
+     */
+    setDebugLayer(layer) {
+      if (this._autoCapture) this._autoCapture.setDebugLayer(layer);
     }
 
     /** Advance to next document side. Call from onCapture when sides > 1. */
