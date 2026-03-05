@@ -281,7 +281,6 @@
     this._maxAreaFraction = options.maxAreaFraction != null ? options.maxAreaFraction : 0.85;
     this._processWidth = options.processWidth || 480;  // Higher res for better edge detection
     // Pre-compute Hough sin/cos tables
-    this._houghReady = false;
     this._sinTable = null;
     this._cosTable = null;
     this._numAngles = 180;
@@ -292,6 +291,7 @@
     this._lastSobelMaxMag = 0;
     // Line tracking: protect known good lines across frames
     this._knownLines = null;
+    this._knownLinesMisses = 0;
   }
 
   /** Initialize Hough lookup tables. */
@@ -303,7 +303,6 @@
       this._sinTable[i] = Math.sin(theta);
       this._cosTable[i] = Math.cos(theta);
     }
-    this._houghReady = true;
   };
 
   /**
@@ -323,15 +322,12 @@
       ph = Math.round(h * scale);
     }
 
-    // Get grayscale and downscaled RGBA at processing resolution
-    var gray, rgbaSmall;
+    // Get grayscale at processing resolution
+    var gray;
     if (scale < 1) {
-      var result = this._downscaleGrayAndRgba(rgba, w, h, pw, ph);
-      gray = result.gray;
-      rgbaSmall = result.rgba;
+      gray = this._downscaleGray(rgba, w, h, pw, ph);
     } else {
       gray = new Uint8Array(w * h);
-      rgbaSmall = rgba;
       for (var i = 0; i < w * h; i++) {
         var ri = i * 4;
         gray[i] = Math.round(0.299 * rgba[ri] + 0.587 * rgba[ri + 1] + 0.114 * rgba[ri + 2]);
@@ -345,12 +341,7 @@
     // 3. Sobel edge detection with gradient magnitude
     var edges = this._sobelEdges(blurred, pw, ph);
 
-    // 4. Create skin mask and suppress edges in skin regions
-    // TODO: Skin mask may be too aggressive - disabled for debugging
-    // var skinMask = this._createSkinMask(rgbaSmall, pw, ph);
-    // this._suppressEdgesInMask(edges, skinMask, pw, ph);
-
-    // 5. Hough line transform on edge pixels
+    // 4. Hough line transform on edge pixels
     var lines = this._houghLines(edges, pw, ph);
     if (this.debug) console.log('[docuSnap] lines found:', lines.length, lines.slice(0,8).map(function(l){ return {theta: Math.round(l.theta*180/Math.PI)+'°', rho: Math.round(l.rho), votes: l.votes}; }));
 
@@ -410,8 +401,8 @@
     return best;
   };
 
-  /** @private - Downscale RGBA to grayscale and keep RGBA for skin detection */
-  DocumentDetector.prototype._downscaleGrayAndRgba = function (rgba, srcW, srcH, dstW, dstH) {
+  /** @private - Downscale RGBA to grayscale at processing resolution */
+  DocumentDetector.prototype._downscaleGray = function (rgba, srcW, srcH, dstW, dstH) {
     var srcCanvas = document.createElement("canvas");
     srcCanvas.width = srcW;
     srcCanvas.height = srcH;
@@ -432,59 +423,7 @@
       var ri = i * 4;
       gray[i] = Math.round(0.299 * pixels[ri] + 0.587 * pixels[ri + 1] + 0.114 * pixels[ri + 2]);
     }
-    return { gray: gray, rgba: pixels };
-  };
-
-  /**
-   * @private - Create skin mask using YCrCb color space.
-   * Returns Uint8Array where 255 = skin, 0 = not skin.
-   */
-  DocumentDetector.prototype._createSkinMask = function (rgba, w, h) {
-    var mask = new Uint8Array(w * h);
-    for (var i = 0; i < w * h; i++) {
-      var ri = i * 4;
-      var r = rgba[ri], g = rgba[ri + 1], b = rgba[ri + 2];
-      
-      // Convert RGB to YCrCb
-      var y  = 0.299 * r + 0.587 * g + 0.114 * b;
-      var cr = (r - y) * 0.713 + 128;
-      var cb = (b - y) * 0.564 + 128;
-      
-      // Skin detection thresholds in YCrCb space
-      // Cr: 133-173, Cb: 77-127 (typical skin tones)
-      if (cr >= 133 && cr <= 173 && cb >= 77 && cb <= 127 && y > 60) {
-        mask[i] = 255;
-      }
-    }
-    return mask;
-  };
-
-  /**
-   * @private - Suppress edges that fall within the skin mask.
-   * This prevents hand/face edges from competing with document edges.
-   */
-  DocumentDetector.prototype._suppressEdgesInMask = function (edges, mask, w, h) {
-    // Dilate skin mask slightly to catch edges at skin boundaries
-    var dilated = new Uint8Array(w * h);
-    var radius = 2;
-    for (var y = radius; y < h - radius; y++) {
-      for (var x = radius; x < w - radius; x++) {
-        var idx = y * w + x;
-        if (mask[idx]) {
-          // Mark neighborhood
-          for (var dy = -radius; dy <= radius; dy++) {
-            for (var dx = -radius; dx <= radius; dx++) {
-              dilated[(y + dy) * w + (x + dx)] = 255;
-            }
-          }
-        }
-      }
-    }
-    
-    // Suppress edges in dilated skin regions
-    for (var i = 0; i < w * h; i++) {
-      if (dilated[i]) edges[i] = 0;
-    }
+    return gray;
   };
 
   /** @private - 5x5 Gaussian blur (sigma ~1.0) */
@@ -513,25 +452,6 @@
         if (y < 2 || y >= h - 2 || x < 2 || x >= w - 2) out[y * w + x] = gray[y * w + x];
       }
     }
-    return out;
-  };
-
-  /** @private - Fast 3x3 Gaussian blur (sigma ~0.85) */
-  DocumentDetector.prototype._gaussianBlur3x3 = function (gray, w, h) {
-    var out = new Uint8Array(w * h);
-    // Kernel: [1,2,1; 2,4,2; 1,2,1] / 16
-    for (var y = 1; y < h - 1; y++) {
-      for (var x = 1; x < w - 1; x++) {
-        var val =
-          gray[(y-1)*w+(x-1)]     + 2*gray[(y-1)*w+x]     + gray[(y-1)*w+(x+1)] +
-          2*gray[y*w+(x-1)]       + 4*gray[y*w+x]         + 2*gray[y*w+(x+1)] +
-          gray[(y+1)*w+(x-1)]     + 2*gray[(y+1)*w+x]     + gray[(y+1)*w+(x+1)];
-        out[y * w + x] = (val + 8) >> 4;
-      }
-    }
-    // Copy border pixels
-    for (var x = 0; x < w; x++) { out[x] = gray[x]; out[(h-1)*w+x] = gray[(h-1)*w+x]; }
-    for (var y = 0; y < h; y++) { out[y*w] = gray[y*w]; out[y*w+w-1] = gray[y*w+w-1]; }
     return out;
   };
 
@@ -627,112 +547,6 @@
     this._lastSobelMag = mag;
     this._lastSobelMaxMag = maxMag;
     return edges;
-  };
-
-  /**
-   * @private - Otsu threshold on gradient magnitudes, clamped to maxVal.
-   * Values above clampVal are binned into the top bucket so extreme
-   * text edges don't dominate the between-class variance.
-   */
-  DocumentDetector.prototype._otsuThresholdClamped = function (mag, w, h, clampVal) {
-    var numBins = 256;
-    var binScale = (numBins - 1) / clampVal;
-    var hist = new Int32Array(numBins);
-    var total = 0;
-
-    for (var i = 0; i < w * h; i++) {
-      var v = mag[i];
-      if (v <= 0) continue; // skip zero-gradient border pixels
-      var bin = Math.min(numBins - 1, (Math.min(v, clampVal) * binScale) | 0);
-      hist[bin]++;
-      total++;
-    }
-
-    if (total === 0) return 0;
-
-    var sumAll = 0;
-    for (var i = 0; i < numBins; i++) sumAll += i * hist[i];
-
-    var wB = 0, sumB = 0;
-    var maxVariance = 0, bestThresh = 0;
-
-    for (var t = 0; t < numBins; t++) {
-      wB += hist[t];
-      if (wB === 0) continue;
-      var wF = total - wB;
-      if (wF === 0) break;
-
-      sumB += t * hist[t];
-      var mB = sumB / wB;
-      var mF = (sumAll - sumB) / wF;
-      var diff = mB - mF;
-      var variance = wB * wF * diff * diff;
-
-      if (variance > maxVariance) {
-        maxVariance = variance;
-        bestThresh = t;
-      }
-    }
-
-    // Map bin index back to gradient scale
-    return bestThresh / binScale;
-  };
-
-  /** @private - 3×3 binary morphological dilation (any neighbor = 255 → 255) */
-  DocumentDetector.prototype._dilate3x3 = function (bin, w, h) {
-    var out = new Uint8Array(w * h);
-    for (var y = 1; y < h - 1; y++) {
-      for (var x = 1; x < w - 1; x++) {
-        if (bin[(y-1)*w+(x-1)] || bin[(y-1)*w+x] || bin[(y-1)*w+(x+1)] ||
-            bin[y*w+(x-1)]     || bin[y*w+x]     || bin[y*w+(x+1)] ||
-            bin[(y+1)*w+(x-1)] || bin[(y+1)*w+x] || bin[(y+1)*w+(x+1)]) {
-          out[y * w + x] = 255;
-        }
-      }
-    }
-    return out;
-  };
-
-  /** @private - 3×3 binary morphological erosion (all neighbors must be 255) */
-  DocumentDetector.prototype._erode3x3 = function (bin, w, h) {
-    var out = new Uint8Array(w * h);
-    for (var y = 1; y < h - 1; y++) {
-      for (var x = 1; x < w - 1; x++) {
-        if (bin[(y-1)*w+(x-1)] && bin[(y-1)*w+x] && bin[(y-1)*w+(x+1)] &&
-            bin[y*w+(x-1)]     && bin[y*w+x]     && bin[y*w+(x+1)] &&
-            bin[(y+1)*w+(x-1)] && bin[(y+1)*w+x] && bin[(y+1)*w+(x+1)]) {
-          out[y * w + x] = 255;
-        }
-      }
-    }
-    return out;
-  };
-
-  /** @private - Morphological closing: dilate then erode. Bridges small gaps. */
-  DocumentDetector.prototype._morphClose3x3 = function (bin, w, h) {
-    return this._erode3x3(this._dilate3x3(bin, w, h), w, h);
-  };
-
-  /** @private - Morphological opening: erode then dilate. Removes small fragments. */
-  DocumentDetector.prototype._morphOpen3x3 = function (bin, w, h) {
-    return this._dilate3x3(this._erode3x3(bin, w, h), w, h);
-  };
-
-  /** @private - Soft 3×3 erosion: keep pixel if >=5 of 9 neighbors are set (majority) */
-  DocumentDetector.prototype._erode3x3Soft = function (bin, w, h) {
-    var out = new Uint8Array(w * h);
-    for (var y = 1; y < h - 1; y++) {
-      for (var x = 1; x < w - 1; x++) {
-        var count = 0;
-        for (var dy = -1; dy <= 1; dy++) {
-          for (var dx = -1; dx <= 1; dx++) {
-            if (bin[(y + dy) * w + (x + dx)]) count++;
-          }
-        }
-        if (count >= 5) out[y * w + x] = 255;
-      }
-    }
-    return out;
   };
 
   /** @private - Morphological opening with horizontal line SE of given length.
@@ -1338,7 +1152,6 @@
             var botMidX = (sorted[3].x + sorted[2].x) / 2;
             var midXAlignFrac = Math.abs(topMidX - botMidX) / pw;
             if (midXAlignFrac > 0.20) { _rej.symmetry++; continue; }
-            var symmetryScore = 1.0 - (midXAlignFrac / 0.20);
 
             // --- EDGE SUPPORT SCORING ---
             // Sample along each side of the rectangle and check what fraction
@@ -1348,10 +1161,6 @@
             var edgeSupport = self._measureEdgeSupport(sorted, edges, pw, ph);
 
             if (edgeSupport < 0.15) { _rej.edgeSupport++; continue; }
-
-            // Rectangularity
-            var rectArea = avgW * avgH;
-            var rectangularity = Math.min(quadArea / rectArea, 1.0);
 
             // Aspect ratio closeness to nearest known document type
             // Score 1.0 when exact match to any known type, lower when further away
@@ -1369,8 +1178,7 @@
             var maxDist = Math.hypot(pw / 2, ph / 2);  // Corner to center distance
             var centerScore = 1.0 - (centerDist / maxDist);  // 1.0 = perfectly centered
 
-            // Final score — core weights as designed:
-            // rectangularity and symmetry act as hard filters above; they don't dilute the score.
+            // Final score — symmetry acts as a hard filter above; it doesn't dilute the score.
             // areaScore rewards larger documents (peaks at ~45% of frame area = typical held-card fill).
             // Old tightness (1 - areaFrac) was backwards: it rewarded small blobs over full cards.
             var areaScore = Math.min(areaFrac / 0.45, 1.0);
@@ -1425,7 +1233,6 @@
                   h: avgH * invScale,
                 },
                 confidence: edgeSupport,
-                classIndex: -1,
                 cornerPoints: {
                   topLeftCorner:     { x: sorted[0].x * invScale, y: sorted[0].y * invScale },
                   topRightCorner:    { x: sorted[1].x * invScale, y: sorted[1].y * invScale },
@@ -1673,13 +1480,6 @@
   // =========================================================================
 
   /**
-   * Calculates distance between two points.
-   */
-  function distance(p1, p2) {
-    return Math.hypot(p1.x - p2.x, p1.y - p2.y);
-  }
-
-  /**
    * Main docuSnap class — document detection and quality assessment.
    *
    * v2.1.0: Pure JS rectangle detector with aspect ratio filtering.
@@ -1689,7 +1489,6 @@
    * @param {number} [options.minAspectRatio=1.2] - min width/height for card detection
    * @param {number} [options.maxAspectRatio=1.8] - max width/height for card detection
    * @param {number} [options.minWidthFraction=0.40] - min document width as fraction of frame width
-   * @param {string|ArrayBuffer} [options.modelUrl] - (deprecated, ignored)
    */
   class docuSnap {
     constructor(options) {
@@ -1722,7 +1521,7 @@
      * Detects a document in the image and returns corner points + bounding box.
      *
      * @param {HTMLImageElement|HTMLCanvasElement|HTMLVideoElement} image
-     * @returns {object|null} { bbox, confidence, classIndex, cornerPoints } or null
+     * @returns {object|null} { bbox, confidence, cornerPoints } or null
      */
     async detect(image) {
       var canvas = this._imageToCanvas(image);
@@ -2223,7 +2022,6 @@
       this._pendingInstruction = '';    // Next text, queued during fade-out
       this._instructionOpacity = 0;     // Current opacity (0–1) for fade animation
       this._instructionFadeTarget = 0;  // Target opacity (0 or 1)
-      this._prevInstructionText = '';    // Previous text for fade-out/in transition
     }
 
     start() {
@@ -2262,7 +2060,6 @@
       this._pendingInstruction = '';
       this._instructionOpacity = 0;
       this._instructionFadeTarget = 0;
-      this._prevInstructionText = '';
       // Persistent small canvas reused every frame for detection (avoids per-frame allocation)
       if (!this._detCanvas) this._detCanvas = document.createElement("canvas");
       this._sessionStartTime = performance.now(); // suppress bbox for first 3s
@@ -2847,7 +2644,6 @@
           sharpness:   report.checks.sharpness.value,
           fullCorners: fullCorners,
           report:      report,
-          timestamp:   performance.now(),
           canvas:      frameCanvas,
         });
         this._lastGoodCorners = fullCorners;
@@ -3892,7 +3688,7 @@
   class DocuSnap {
     /**
      * @param {object}   options
-     * @param {string}   [options.documentType='any']     'id' | 'passport' | 'document' | 'any'
+     * @param {string}   [options.documentType='any']     'id' | 'document' | 'any'
      * @param {string}   [options.captureMode='smart']    'smart' | 'auto' | 'manual' | 'file'
      * @param {number}   [options.sides=1]                1 | 2
      * @param {Array}    [options.sideConfig]             Per-side overrides [{ documentType, quality, face }]
@@ -4201,21 +3997,11 @@
         self._capturedSides.push(cr);
         self._onCapture(cr);
 
-        if (cr.isLastSide) {
-          // All sides captured. Leave DocumentAutoCapture in its CAPTURED state
-          // so the _tick drawing loop keeps the canvas live — identical to the
-          // intermediate-side path below.  start() cancels the old rAF if the
-          // integrator calls snap.resume() / snap.reset() to start a new session.
-          self._scanState = 'paused';
-        } else {
-          // Intermediate side captured — pause at the DocuSnap level.
-          // DocumentAutoCapture stays in its own CAPTURED state: the _tick loop
-          // keeps drawing the live video frame (canvas stays active for the user
-          // to see while reading the flip prompt) but will NOT fire another capture.
-          // Scanning resumes only when the integrator calls snap.nextSide(), which
-          // calls _autoCapture.reset() → increments side → starts fresh detection.
-          self._scanState = 'paused';
-        }
+        // Pause scanning — DocumentAutoCapture stays in its CAPTURED state so
+        // the _tick drawing loop keeps the canvas live.  For the last side the
+        // integrator may call snap.resume()/snap.reset(); for intermediate sides
+        // the integrator calls snap.nextSide() to start fresh detection.
+        self._scanState = 'paused';
       }).catch(function (err) {
         self._onError({ code: 'CAPTURE_ERROR', message: err.message, cause: err });
       });
