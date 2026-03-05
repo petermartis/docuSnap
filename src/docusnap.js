@@ -2522,8 +2522,11 @@
       this._animFrameId = requestAnimationFrame(function (timestamp) {
         if (self._state === State.IDLE) return;
 
-        // ── Always render video + overlay at 60fps ──────────────────────
-        self._renderFrame();
+        // ── Render video + overlay at ~30fps ──────────────────────
+        if (!self._lastRenderTime || timestamp - self._lastRenderTime >= 33) {
+          self._lastRenderTime = timestamp;
+          self._renderFrame();
+        }
 
         // When captured (waiting for nextSide / user interaction), keep the canvas
         // alive so the video preview stays live during the flip prompt.
