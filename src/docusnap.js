@@ -2522,11 +2522,8 @@
       this._animFrameId = requestAnimationFrame(function (timestamp) {
         if (self._state === State.IDLE) return;
 
-        // ── Render video + overlay at ~30fps ──────────────────────
-        if (!self._lastRenderTime || timestamp - self._lastRenderTime >= 33) {
-          self._lastRenderTime = timestamp;
-          self._renderFrame();
-        }
+        // ── Render video + overlay at 60fps ──────────────────────
+        self._renderFrame();
 
         // When captured (waiting for nextSide / user interaction), keep the canvas
         // alive so the video preview stays live during the flip prompt.
@@ -2607,6 +2604,22 @@
       }
 
       ctx.drawImage(this._video, 0, 0, dispW, dispH);
+
+      // Inter-frame prediction: advance display corners by Kalman velocity
+      // between detection updates so the box tracks motion at 60fps.
+      // Detection runs at ~10-15fps; without this the box freezes between updates.
+      // Velocity is per-detection-step, scale to per-render-frame:
+      //   renderDt ≈ 16ms, detectionDt ≈ _frameIntervalMs (66-100ms)
+      if (this._displayCorners && this._kalmanFilters) {
+        var velScale = 16.67 / (this._frameIntervalMs || 66);
+        var cornerKeys = ['topLeftCorner', 'topRightCorner', 'bottomLeftCorner', 'bottomRightCorner'];
+        for (var i = 0; i < cornerKeys.length; i++) {
+          var kfX = this._kalmanFilters[i * 2];
+          var kfY = this._kalmanFilters[i * 2 + 1];
+          this._displayCorners[cornerKeys[i]].x += kfX.v * velScale;
+          this._displayCorners[cornerKeys[i]].y += kfY.v * velScale;
+        }
+      }
 
       // Convexity guard: bowtie corners from Kalman crossing → reset
       if (this._displayCorners && !this._isCornersConvex(this._displayCorners)) {
