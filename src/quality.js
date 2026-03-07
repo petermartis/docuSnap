@@ -1,4 +1,4 @@
-/*! docuSnap Quality Assessment Module | MIT License */
+/*! docuSnap Quality Assessment Module */
 
 (function (global, factory) {
   typeof exports === "object" && typeof module !== "undefined"

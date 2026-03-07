@@ -1,4 +1,4 @@
-/*! docuSnap v1.4.0 | (c) ColonelParrot and other contributors | MIT License */
+/*! docuSnap v3.0.2 */
 
 const { Canvas, createCanvas, Image, ImageData } = require("canvas");
 const { JSDOM } = require("jsdom");

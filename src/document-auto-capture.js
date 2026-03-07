@@ -1,4 +1,4 @@
-/*! docuSnap Document Auto Capture | MIT License */
+/*! docuSnap Document Auto Capture */
 
 (function (global, factory) {
   typeof exports === "object" && typeof module !== "undefined"
@@ -367,7 +367,7 @@
         this.ctx.fillRect(10, 10, this.canvasElement.width - 20, 40);
         
         this.ctx.fillStyle = '#ffffff';
-        this.ctx.font = '16px sans-serif';
+        this.ctx.font = '14px sans-serif';
         this.ctx.fillText(assessment.issues[0], 20, 35);
       }
 

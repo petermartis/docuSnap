@@ -20,15 +20,18 @@
 
 const http  = require('http');
 const https = require('https');
+const fs    = require('fs');
+const path  = require('path');
 
 const PORT         = parseInt(process.env.PROXY_PORT  || '3001', 10);
 const IDRND_KEY    = process.env.IDRND_API_KEY || 'ouwWh6b3AB7rOIVVF3I5daGP20M0ncq83S0funej';
 const IDRND_HOST   = 'idlivedoc-rest-api.idrnd.net';
 const IDRND_PATH   = '/check_liveness';
+const CONFIG_FILE  = path.join(__dirname, 'config.json');
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
 };
 
@@ -40,9 +43,45 @@ const server = http.createServer(function (req, res) {
     return;
   }
 
+  // ── Shared config read/write ────────────────────────────────────────────
+  if (req.url === '/config') {
+    if (req.method === 'GET') {
+      fs.readFile(CONFIG_FILE, 'utf8', function (err, data) {
+        if (err) {
+          res.writeHead(500, Object.assign({ 'Content-Type': 'application/json' }, CORS_HEADERS));
+          res.end(JSON.stringify({ error: err.message }));
+          return;
+        }
+        res.writeHead(200, Object.assign({ 'Content-Type': 'application/json' }, CORS_HEADERS));
+        res.end(data);
+      });
+      return;
+    }
+    if (req.method === 'POST') {
+      var chunks = [];
+      req.on('data', function (c) { chunks.push(c); });
+      req.on('end', function () {
+        try {
+          var incoming = JSON.parse(Buffer.concat(chunks).toString());
+          // Read existing config, merge, write back
+          var existing = {};
+          try { existing = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) { /* new file */ }
+          Object.assign(existing, incoming);
+          fs.writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2) + '\n');
+          res.writeHead(200, Object.assign({ 'Content-Type': 'application/json' }, CORS_HEADERS));
+          res.end(JSON.stringify({ ok: true }));
+        } catch (e) {
+          res.writeHead(400, Object.assign({ 'Content-Type': 'application/json' }, CORS_HEADERS));
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+  }
+
   if (req.method !== 'POST' || req.url !== '/check_liveness') {
     res.writeHead(404, Object.assign({ 'Content-Type': 'text/plain' }, CORS_HEADERS));
-    res.end('Not found. POST /check_liveness');
+    res.end('Not found. POST /check_liveness or GET/POST /config');
     return;
   }
 

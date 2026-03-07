@@ -951,6 +951,9 @@ const SETTINGS_KEY = 'docusnap_settings';
 const SETTING_IDS  = ['cfgDocType','cfgMode','cfgSides','cfgFace','cfgSharpness','cfgBrightness','cfgGlare','cfgDocSize','cfgLivenessProxy','cfgAnthropicKey',
   'msg_SEARCHING','msg_MOVE_CLOSER','msg_CENTER_DOCUMENT','msg_SHARPEN','msg_REDUCE_GLARE','msg_IMPROVE_LIGHTING','msg_HOLD_STILL','msg_CONFIRMED'];
 
+// IDs that are shared via config.json (persisted server-side for all users)
+const SHARED_SETTING_IDS = ['cfgAnthropicKey'];
+
 function saveSettings() {
   try {
     var obj = {};
@@ -960,6 +963,23 @@ function saveSettings() {
     });
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(obj));
   } catch (e) { /* localStorage unavailable */ }
+
+  // Also persist shared settings to the proxy → config.json
+  try {
+    var shared = {};
+    SHARED_SETTING_IDS.forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el && el.value) shared[id] = el.value;
+    });
+    if (Object.keys(shared).length) {
+      var proxyBase = document.getElementById('cfgLivenessProxy').value.trim() || 'http://localhost:3001';
+      fetch(proxyBase + '/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(shared),
+      }).catch(function () { /* proxy not running — config.json not updated */ });
+    }
+  } catch (e) { /* ignore */ }
 }
 
 function loadSettings() {
@@ -978,9 +998,29 @@ function loadSettings() {
   } catch (e) { /* ignore */ }
 }
 
-// Restore saved settings before first buildConfig
-loadSettings();
-onDocTypeChange();
+// Load shared config: try proxy /config first, fall back to static config.json
+(function loadSharedAndLocalSettings() {
+  var proxyBase = (document.getElementById('cfgLivenessProxy') || {}).value || 'http://localhost:3001';
+  proxyBase = proxyBase.trim() || 'http://localhost:3001';
+
+  function applyShared(shared) {
+    Object.keys(shared).forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el && shared[id]) el.value = shared[id];
+    });
+    loadSettings();
+    onDocTypeChange();
+  }
+
+  fetch(proxyBase + '/config').then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+    .then(applyShared)
+    .catch(function () {
+      // Proxy unavailable — fall back to static config.json
+      fetch('config.json').then(function (r) { return r.ok ? r.json() : {}; })
+        .catch(function () { return {}; })
+        .then(applyShared);
+    });
+})();
 
 // ── Config ────────────────────────────────────────────────────────────────
 function buildConfig() {

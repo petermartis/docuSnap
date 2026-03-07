@@ -1,4 +1,4 @@
-/*! docuSnap v3.0.2  */
+/*! docuSnap v3.0.0 | (c) ColonelParrot and other contributors | MIT License */
 
 (function (global, factory) {
   if (typeof exports === "object" && typeof module !== "undefined") {
@@ -179,12 +179,9 @@
     this.P11 = 1;
     
     // Noise parameters (tuned for smooth bounding box tracking)
-    // Q = process noise: how much we expect the true state to change per step.
-    //     Higher Q = filter trusts velocity model more, smoother coasting.
-    // R = measurement noise: how noisy individual detector measurements are.
-    //     Higher R = filter is more skeptical of each measurement, less jitter.
-    this.Q = processNoise != null ? processNoise : 0.5;      // Process noise (trust velocity model)
-    this.R = measurementNoise != null ? measurementNoise : 30.0;  // Measurement noise (heavy smoothing, reject jitter)
+    // Lower Q = smoother, higher R = trust predictions more (less jitter)
+    this.Q = processNoise != null ? processNoise : 0.01;     // Process noise (lowered for smoothness)
+    this.R = measurementNoise != null ? measurementNoise : 12.0;  // Measurement noise (heavier smoothing, less jitter)
   }
 
   /**
@@ -239,23 +236,12 @@
    * @returns {number} Predicted position
    */
   KalmanFilter1D.prototype.coast = function() {
-    // Decay velocity toward zero during coast — a stationary document shouldn't
-    // drift. Without decay, even tiny velocity estimates accumulate over many
-    // missed frames and push the box off-screen.
-    this.v *= 0.85;  // 15% velocity decay per coast step
     this.x = this.x + this.v;
     var P00 = this.P00 + this.P01 + this.P10 + this.P11 + this.Q;
     var P01 = this.P01 + this.P11;
     var P10 = this.P10 + this.P11;
     var P11 = this.P11 + this.Q;
-    // Cap covariance to prevent unbounded growth during long coast sequences.
-    // Without this, after ~20 missed frames the Kalman gain approaches 1.0
-    // and the next measurement (even a false positive) snaps the box instantly.
-    var maxP = this.R * 4;  // reasonable upper bound
-    this.P00 = Math.min(P00, maxP);
-    this.P01 = Math.min(P01, maxP);
-    this.P10 = Math.min(P10, maxP);
-    this.P11 = Math.min(P11, maxP);
+    this.P00 = P00; this.P01 = P01; this.P10 = P10; this.P11 = P11;
     return this.x;
   };
 
@@ -536,8 +522,7 @@
     var margin = Math.round(w * 0.1);
     var roi = { x0: margin, y0: margin, x1: w - margin - 1, y1: h - margin - 1 };
     var threshold = this._otsuThresholdROI(mag, w, h, clampVal, roi);
-    threshold *= 0.75;  // less aggressive relaxation — rejects more texture noise
-    //                       while still catching card edges that are slightly below Otsu
+    threshold *= 0.65;  // balanced — suppress texture but keep weak card edges
 
     // 4. Binarize
     var edges = new Uint8Array(w * h);
@@ -548,15 +533,15 @@
     // 5. Directional morphology: opening with line SEs favors long straight
     //    edges (card borders) over small isotropic texture blobs (wood grain).
     //    Union of H-opening and V-opening preserves both orientations.
-    var openH = this._morphOpenLineH(edges, w, h, 7);
-    var openV = this._morphOpenLineV(edges, w, h, 7);
+    var openH = this._morphOpenLineH(edges, w, h, 5);
+    var openV = this._morphOpenLineV(edges, w, h, 5);
     for (var i = 0; i < w * h; i++) {
       edges[i] = (openH[i] || openV[i]) ? 255 : 0;
     }
 
     // 6. Connected-component filter: remove blobs < minArea pixels.
     //    Wood grain produces many small blobs; card border is a large component.
-    edges = this._removeSmallComponents(edges, w, h, 150);
+    edges = this._removeSmallComponents(edges, w, h, 80);
 
     // Cache for debug visualization
     this._lastSobelMag = mag;
@@ -736,13 +721,10 @@
       }
     }
 
-    // Find peaks: dynamic threshold based on expected document size.
-    // A real card edge at processing resolution is typically 100-300px long
-    // and should accumulate proportional votes. Using 15% of expected card
-    // width as floor rejects short texture/grain lines while keeping
-    // the shorter sides of small or distant cards.
+    // Find peaks: dynamic threshold based on expected document size
+    // Threshold = 20% of expected card width — low enough for short sides
     var expectedCardWidth = w * this._minWidthFraction;
-    var minLineLen = Math.max(30, Math.round(expectedCardWidth * 0.15));
+    var minLineLen = 25;
     var peaks = [];
     for (var ai = 0; ai < numAngles; ai++) {
       for (var ri = 0; ri < numRho; ri++) {
@@ -758,8 +740,8 @@
 
     // Non-maximum suppression: merge nearby lines
     var lines = [];
-    var rhoTolerance = Math.max(8, diag * 0.05);
-    var thetaTolerance = 7 * Math.PI / 180; // 7 degrees — merges split peaks from same edge
+    var rhoTolerance = Math.max(5, diag * 0.03);
+    var thetaTolerance = 5 * Math.PI / 180; // 5 degrees
 
     for (var i = 0; i < peaks.length && lines.length < 40; i++) {
       var p = peaks[i];
@@ -1285,7 +1267,7 @@
    * @returns {number} 0.0 to 1.0, support score with gap penalty
    */
   DocumentDetector.prototype._measureEdgeSupport = function (corners, edges, w, h) {
-    var tolerance = 8;   // pixels — how far from the line to look for edges (wider to account for blur + downscale)
+    var tolerance = 5;   // pixels — how far from the line to look for edges
     var minSupportRequired = 0.15;  // If any single side < 15%, return that (not avg)
     var maxGapFraction = 0.40;  // Allow gaps from rounded corners / fingers
 
@@ -2025,9 +2007,6 @@
       // State: [position, velocity], we track 8 values (4 corners x 2 coords)
       this._kalmanFilters = null;        // Array of 8 KalmanFilter1D instances
       
-      // Render-lerp state: smoothly interpolated corners for 60fps drawing
-      this._renderCorners = null;
-      
       // Bounding box overlay opacity state (0 = clear, 70 = max overlay)
       this._currentTransparency = 70;    // Start with overlay (will fade as quality improves)
       this._transparencyStep = 5;        // Change by 5% per frame
@@ -2063,7 +2042,6 @@
       this._stableCorners = null;
       this._stableFullCorners = null;
       this._displayCorners = null;
-      this._renderCorners = null;        // Reset render-lerp state
       this._cornerRejectCount = 0;
       this._kalmanFilters = null;
       this._currentTransparency = 70;    // Reset overlay opacity
@@ -2462,50 +2440,28 @@
       // Don't draw overlay when captured — just show clean video feed
       if (this._state === State.CAPTURED) return;
 
-      // Smooth interpolation: instead of velocity-based prediction (which
-      // amplifies Kalman velocity noise and causes vibration), use simple
-      // exponential lerp from the currently rendered position toward the
-      // Kalman-filtered target. This produces buttery-smooth 60fps animation
-      // regardless of the detection rate (10-15fps).
+      // Inter-frame prediction: compute predicted corners for drawing WITHOUT
+      // mutating _displayCorners. This prevents velocity drift from accumulating
+      // across render frames and avoids bowtie artifacts from corner crossing.
       var drawCorners = this._displayCorners;
-      if (this._displayCorners) {
+      if (this._displayCorners && this._kalmanFilters) {
+        var velScale = 16.67 / (this._frameIntervalMs || 66);
         var cornerKeys = ['topLeftCorner', 'topRightCorner', 'bottomLeftCorner', 'bottomRightCorner'];
-        // Initialize render-lerp state on first frame
-        if (!this._renderCorners) {
-          this._renderCorners = {};
-          for (var i = 0; i < cornerKeys.length; i++) {
-            var key = cornerKeys[i];
-            this._renderCorners[key] = {
-              x: this._displayCorners[key].x,
-              y: this._displayCorners[key].y,
-            };
-          }
-        }
-        // Lerp factor: 0.18 gives ~200ms settling time at 60fps
-        // (each frame moves 18% of remaining distance to target)
-        var lerpFactor = 0.18;
         drawCorners = {};
         for (var i = 0; i < cornerKeys.length; i++) {
           var key = cornerKeys[i];
-          var rx = this._renderCorners[key].x;
-          var ry = this._renderCorners[key].y;
-          var tx = this._displayCorners[key].x;
-          var ty = this._displayCorners[key].y;
-          var nx = rx + (tx - rx) * lerpFactor;
-          var ny = ry + (ty - ry) * lerpFactor;
-          drawCorners[key] = { x: nx, y: ny };
-          this._renderCorners[key].x = nx;
-          this._renderCorners[key].y = ny;
+          var kfX = this._kalmanFilters[i * 2];
+          var kfY = this._kalmanFilters[i * 2 + 1];
+          drawCorners[key] = {
+            x: this._displayCorners[key].x + kfX.v * velScale,
+            y: this._displayCorners[key].y + kfY.v * velScale,
+          };
         }
 
-        // Convexity guard: if interpolated corners form a bowtie, snap to target
+        // Convexity guard: if predicted corners form a bowtie, fall back to
+        // raw _displayCorners (which are always from the Kalman filter state)
         if (!this._isCornersConvex(drawCorners)) {
           drawCorners = this._displayCorners;
-          for (var i = 0; i < cornerKeys.length; i++) {
-            var key = cornerKeys[i];
-            this._renderCorners[key].x = this._displayCorners[key].x;
-            this._renderCorners[key].y = this._displayCorners[key].y;
-          }
         }
       }
 
@@ -2916,7 +2872,6 @@
           this._stableCorners = null;
           this._stableFullCorners = null;
           this._displayCorners = null;
-          this._renderCorners = null;
           this._kalmanFilters = null;
         }
         return;
@@ -2937,39 +2892,7 @@
       // Update Kalman filters with new measurements
       var cornerKeys = ['topLeftCorner', 'topRightCorner', 'bottomLeftCorner', 'bottomRightCorner'];
       var smoothed = {};
-      var maxMove = Math.max(frameW, frameH) * 0.06;  // 6% clamp per detection frame (was 15%)
-
-      // Outlier gate: if ANY corner jumps more than 20% of frame size from its
-      // Kalman prediction, treat the entire detection as a false positive and
-      // coast instead. This prevents the box from snapping to a random rectangle
-      // (wall edge, bag, clothing) that the detector briefly latches onto.
-      var outlierThreshold = Math.max(frameW, frameH) * 0.20;
-      var isOutlier = false;
-      for (var i = 0; i < cornerKeys.length; i++) {
-        var key = cornerKeys[i];
-        var kfX = this._kalmanFilters[i * 2];
-        var kfY = this._kalmanFilters[i * 2 + 1];
-        var predX = kfX.x + kfX.v;  // one-step prediction
-        var predY = kfY.x + kfY.v;
-        var dx = newCorners[key].x - predX;
-        var dy = newCorners[key].y - predY;
-        if (Math.sqrt(dx * dx + dy * dy) > outlierThreshold) {
-          isOutlier = true;
-          break;
-        }
-      }
-
-      if (isOutlier) {
-        // Reject this measurement entirely — coast on last known velocity
-        for (var i = 0; i < cornerKeys.length; i++) {
-          smoothed[cornerKeys[i]] = {
-            x: this._kalmanFilters[i * 2].coast(),
-            y: this._kalmanFilters[i * 2 + 1].coast(),
-          };
-        }
-        this._displayCorners = smoothed;
-        return;
-      }
+      var maxMove = Math.max(frameW, frameH) * 0.15;  // 15% clamp per detection frame
 
       for (var i = 0; i < cornerKeys.length; i++) {
         var key = cornerKeys[i];
@@ -2979,7 +2902,7 @@
         var filteredX = this._kalmanFilters[i * 2].update(measurement.x);
         var filteredY = this._kalmanFilters[i * 2 + 1].update(measurement.y);
 
-        // 6% max change clamp: prevent sudden jumps from noisy detections
+        // 15% max change clamp: prevent sudden jumps from noisy detections
         if (this._displayCorners) {
           var prevX = this._displayCorners[key].x;
           var prevY = this._displayCorners[key].y;
