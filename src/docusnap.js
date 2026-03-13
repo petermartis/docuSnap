@@ -140,6 +140,36 @@
   };
 
   /**
+   * Measures sharpness within the document quad bounding box rather than the whole frame.
+   * Falls back to full-frame sharpness if cornerPoints are missing or region is too small.
+   */
+  QualityAssessor.prototype.measureSharpnessInRegion = function (gray, w, h, cornerPoints) {
+    if (!cornerPoints) return this.measureSharpness(gray, w, h);
+    var tl = cornerPoints.topLeftCorner;
+    var tr = cornerPoints.topRightCorner;
+    var bl = cornerPoints.bottomLeftCorner;
+    var br = cornerPoints.bottomRightCorner;
+    if (!tl || !tr || !bl || !br) return this.measureSharpness(gray, w, h);
+
+    var minX = Math.max(0, Math.floor(Math.min(tl.x, tr.x, bl.x, br.x)));
+    var maxX = Math.min(w - 1, Math.ceil(Math.max(tl.x, tr.x, bl.x, br.x)));
+    var minY = Math.max(0, Math.floor(Math.min(tl.y, tr.y, bl.y, br.y)));
+    var maxY = Math.min(h - 1, Math.ceil(Math.max(tl.y, tr.y, bl.y, br.y)));
+    var rw = maxX - minX + 1;
+    var rh = maxY - minY + 1;
+    if (rw < 8 || rh < 8) return this.measureSharpness(gray, w, h);
+
+    // Extract the bounding-box sub-image
+    var regionGray = new Uint8ClampedArray(rw * rh);
+    for (var y = 0; y < rh; y++) {
+      for (var x = 0; x < rw; x++) {
+        regionGray[y * rw + x] = gray[(minY + y) * w + (minX + x)];
+      }
+    }
+    return this.measureSharpness(regionGray, rw, rh);
+  };
+
+  /**
    * Check if point is inside quadrilateral using cross product method.
    */
   QualityAssessor.prototype._pointInQuad = function (px, py, tl, tr, br, bl) {
@@ -2043,7 +2073,9 @@
 
     /**
      * Checks the document's size relative to the frame.
-     * Returns width coverage (0-1) since aspect ratio is consistent.
+     * Returns polygon area as a fraction of frame area (shoelace formula).
+     * More accurate than width-only measurement — detects cards that are
+     * close but narrow (e.g., held at a steep angle).
      */
     measureDocumentSize(cornerPoints, frameWidth, frameHeight) {
       var tl = cornerPoints.topLeftCorner;
@@ -2053,14 +2085,15 @@
 
       if (!tl || !tr || !bl || !br) return 0;
 
-      // Get bounding box width from corners
-      var allX = [tl.x, tr.x, bl.x, br.x];
-      var minX = Math.min.apply(null, allX);
-      var maxX = Math.max.apply(null, allX);
-      var bboxWidth = maxX - minX;
+      // Shoelace formula for quadrilateral area (vertices in order: TL→TR→BR→BL)
+      var area = Math.abs(
+        tl.x * tr.y - tr.x * tl.y +
+        tr.x * br.y - br.x * tr.y +
+        br.x * bl.y - bl.x * br.y +
+        bl.x * tl.y - tl.x * bl.y
+      ) * 0.5;
 
-      // Return width coverage as fraction of frame width
-      return bboxWidth / frameWidth;
+      return area / (frameWidth * frameHeight);
     }
 
     /**
@@ -2082,17 +2115,19 @@
       // Pixel brightness threshold for glare detection (0-255).
       // 248 = only catch near-white hotspots; white card background (~230-247) is not flagged.
       var glareThreshold = thresholds.glareThreshold !== undefined ? thresholds.glareThreshold : 248;
-      var documentSizeMin = thresholds.documentSizeMin !== undefined ? thresholds.documentSizeMin : 0.15;
+      var documentSizeMin = thresholds.documentSizeMin !== undefined ? thresholds.documentSizeMin : 0.15;  // polygon area fraction
       var cornerMarginPx = thresholds.cornerMarginPx !== undefined ? thresholds.cornerMarginPx : 10;
       // Minimum composite-score confidence from the rectangle detector.
-      // detect() now exports the full composite score (not just edgeSupport) and won't
-      // return below 0.45, so this threshold aligns with the detector's own floor.
-      var confidenceMin = thresholds.confidenceMin !== undefined ? thresholds.confidenceMin : 0.45;
+      // Must sit well above the detector's 0.45 floor so this is a real additional gate
+      // (rectangle must be clearly detected, not just squeaking past the floor).
+      var confidenceMin = thresholds.confidenceMin !== undefined ? thresholds.confidenceMin : 0.60;
 
       // Convert to grayscale once, reuse for all quality checks
       var gray = this._quality.rgbaToGrayscale(rgba, w, h);
 
-      var sharpness = this._quality.measureSharpness(gray, w, h);
+      // Measure sharpness within document quad when corners are available — avoids
+      // blurry backgrounds inflating or deflating the score.
+      var sharpness = this._quality.measureSharpnessInRegion(gray, w, h, cornerPoints);
       var brightness = this._quality.measureBrightness(gray, w, h);
       // Measure glare within document bounds for accuracy (falls back to whole frame if no corners)
       var glare = this._quality.detectGlareInRegion(gray, w, h, cornerPoints, glareThreshold);
@@ -2188,7 +2223,8 @@
       this._frameBuffer = [];          // Rolling buffer of last N frames with quality
       this._frameBufferSize = options.frameBufferSize || 10;
       this._lastGoodCorners = null;    // Previous good frame's corners for spatial consistency
-      this._cornerDriftMax = 0.12;     // Max 12% drift (fraction of frame diagonal)
+      this._consecutiveWindowAnchor = null; // Corners at start of current good-frame streak
+      this._cornerDriftMax = 0.04;     // Max 4% drift from streak anchor (fraction of frame diagonal)
       this._stayStillStart = 0;
       this._animFrameId = null;
       this._lastEvalTime = 0;
@@ -2825,6 +2861,11 @@
       if (this._state === State.DETECTING) {
         if (report.allPassed && fullCorners && this._areCornersConsistent(fullCorners, vw, vh)) {
           this._consecutiveGoodFrames++;
+          if (this._consecutiveGoodFrames === 1) {
+            // Record the first frame of this streak as the spatial anchor.
+            // All subsequent frames in the streak must stay within _cornerDriftMax of it.
+            this._consecutiveWindowAnchor = fullCorners;
+          }
           if (this._consecutiveGoodFrames >= this._consecutiveNeeded) {
             // Enter STAY_STILL in both auto and manual mode.
             // Auto mode: hold for stayStillDurationMs so user sees the bbox.
@@ -2842,6 +2883,7 @@
           }
         } else {
           this._consecutiveGoodFrames = 0;
+          this._consecutiveWindowAnchor = null;
           if (!report.allPassed) {
             this._emitInstruction(report);
           }
@@ -2854,6 +2896,7 @@
           // Quality dropped — reset to DETECTING
           this._state = State.DETECTING;
           this._consecutiveGoodFrames = 0;
+          this._consecutiveWindowAnchor = null;
           this._frameBuffer = [];
           this._lastGoodCorners = null;
           this._trackingMode = false;          // Exit edge tracking
@@ -2990,23 +3033,26 @@
     }
 
     /**
-     * @private - Check if current corners are spatially consistent with previous good frame.
-     * Returns true if this is the first good frame OR corners haven't drifted more than
-     * _cornerDriftMax (fraction of frame diagonal).  Prevents false rectangles (wall edges,
-     * clothing) from incrementing the consecutive good frame counter.
+     * @private - Check if current corners are spatially consistent with the streak anchor.
+     * Returns true if this is the first good frame in a streak, OR if corners haven't
+     * drifted more than _cornerDriftMax (fraction of frame diagonal) from the anchor
+     * (the first frame of the current consecutive streak). This prevents gradual drift
+     * accumulation across the streak from being accepted.
      */
     _areCornersConsistent(corners, frameW, frameH) {
-      if (!this._lastGoodCorners) return true;  // first good frame — accept
-      var prev = this._lastGoodCorners;
+      // Use streak anchor if available, otherwise fall back to last frame
+      var ref = this._consecutiveWindowAnchor || this._lastGoodCorners;
+      if (!ref) return true;  // first good frame — accept
       var diag = Math.sqrt(frameW * frameW + frameH * frameH);
       var maxPx = diag * this._cornerDriftMax;
       var keys = ['topLeftCorner', 'topRightCorner', 'bottomRightCorner', 'bottomLeftCorner'];
       for (var i = 0; i < keys.length; i++) {
-        var dx = corners[keys[i]].x - prev[keys[i]].x;
-        var dy = corners[keys[i]].y - prev[keys[i]].y;
+        var dx = corners[keys[i]].x - ref[keys[i]].x;
+        var dy = corners[keys[i]].y - ref[keys[i]].y;
         if (Math.sqrt(dx * dx + dy * dy) > maxPx) {
-          // Corner jumped — reset spatial tracking
+          // Corner drifted too far from streak anchor — reset spatial tracking
           this._lastGoodCorners = null;
+          this._consecutiveWindowAnchor = null;
           this._frameBuffer = [];
           return false;
         }
@@ -4091,7 +4137,7 @@
         videoElement:            this._videoElement,
         canvasElement:           this._canvasElement,
         thresholds:              this._thresholds,
-        consecutiveFramesNeeded: isManual ? 10 : 10,
+        consecutiveFramesNeeded: isManual ? 15 : 15,
         stayStillDurationMs:     isManual ? 999999 : 1000,  // never auto-fires in manual mode
         frameIntervalMs:         66,
         manualMode:              isManual,
@@ -4282,8 +4328,13 @@
         brightnessMin:   ((q.brightness != null ? q.brightness : 40) / 100) * 178,
         glareMax:        (q.glare          != null ? q.glare          : 18)  / 100,
         glareThreshold:   q.glareThreshold != null ? q.glareThreshold : 225,
-        documentSizeMin: (q.size  != null ? q.size  : 40) / 100,
+        // documentSizeMin is now a polygon-area fraction (0-1); default 15 = 15% of frame area,
+        // which requires a reasonably-sized card presence.
+        documentSizeMin: (q.size  != null ? q.size  : 15) / 100,
         cornerMarginPx:  10,
+        // Must be well above the detector's 0.45 floor so confidence is a real gate,
+        // not just a pass-through.
+        confidenceMin:   0.60,
       };
     }
 
