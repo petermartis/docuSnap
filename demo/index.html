@@ -69,9 +69,7 @@
       transition: opacity 0.3s ease;
       z-index: 5;
     }
-    #instructionBanner.visible   { opacity: 1; }
-    #instructionBanner.escalated { color: #ffd700; }
-    #instructionBanner.good      { color: #fff; }
+    #instructionBanner.visible { opacity: 1; }
 
     /* ─────────────────── Face badge (overlay) ─────────────────── */
     #faceBadge {
@@ -1130,7 +1128,7 @@ function showFallbackMode() {
   canvas.style.display       = 'none';
   fallbackCont.style.display = '';
   videoContainer.classList.add('fallback-mode');
-  banner._enabled = false; banner.className = ''; _bannerShownText = null; _bannerAnimating = false;
+  banner._enabled = false; banner.className = ''; _bannerShownText = null; _bannerAnimating = false; _bannerPending = null;
   startBtn.style.display   = 'none';
   stopBtn.style.display    = 'none';
   captureBtn.style.display = 'none';
@@ -1167,42 +1165,45 @@ function resolveDisplayCode(frame) {
 }
 
 // ── Banner animation ───────────────────────────────────────────────────────
-// Each caption fades in (300ms), holds until the next change is due, then
-// fades out (300ms) before the new text fades in — no more instant flashes.
-let _bannerShownText = null;  // text currently in the DOM
-let _bannerAnimating = false; // true during fade-out + fade-in transition
+let _bannerShownText = null;
+let _bannerAnimating = false;
+let _bannerPending   = null;  // latest text queued while animating
 
-function setBannerText(text, cls) {
+function setBannerText(text) {
   if (!banner._enabled) return;
-  if (_bannerAnimating) return;  // let current transition finish; retry next frame
 
-  const currentlyVisible = banner.className.includes('visible');
-
-  if (text === _bannerShownText && currentlyVisible) {
-    // Same text — sync colour class only (e.g. escalated → good)
-    if (banner.className !== cls) banner.className = cls;
+  if (_bannerAnimating) {
+    _bannerPending = text;  // keep latest, apply after animation finishes
     return;
   }
 
-  if (!currentlyVisible) {
-    // Banner was hidden — set text and fade straight in
+  if (text === _bannerShownText && banner.className === 'visible') return;
+
+  if (banner.className !== 'visible') {
+    // Not visible — set text and fade straight in
     _bannerShownText   = text;
     banner.textContent = text;
-    banner.className   = cls;
+    banner.className   = 'visible';
     return;
   }
 
-  // Banner is visible and text changed — fade out, swap, fade in
+  // Visible and text changed — fade out, swap, fade in
   _bannerAnimating = true;
-  const baseClass = cls.replace(/\bvisible\b\s*/g, '').trim();
-  banner.className = baseClass;           // drop 'visible' → CSS fade-out begins (300ms)
+  banner.className = '';                  // drop 'visible' → CSS fade-out (300ms)
   setTimeout(function () {
-    if (!banner._enabled) { _bannerAnimating = false; return; }
-    _bannerShownText   = text;
-    banner.textContent = text;
-    banner.className   = cls;             // restore 'visible' → CSS fade-in begins (300ms)
+    if (!banner._enabled) { _bannerAnimating = false; _bannerPending = null; return; }
+    var next = (_bannerPending !== null) ? _bannerPending : text;
+    _bannerPending     = null;
+    _bannerShownText   = next;
+    banner.textContent = next;
+    banner.className   = 'visible';       // CSS fade-in (300ms)
     setTimeout(function () {
-      _bannerAnimating = false;           // allow next transition after fade-in completes
+      _bannerAnimating = false;
+      // Flush any update that arrived during fade-in
+      if (_bannerPending !== null) {
+        var p = _bannerPending; _bannerPending = null;
+        setBannerText(p);
+      }
     }, 300);
   }, 300);
 }
@@ -1232,12 +1233,7 @@ function handleFrame(frame) {
   qualityGrid.classList.toggle('inactive', searching);
 
   // Instruction banner (overlay on video) — uses throttled code/hint
-  if (banner._enabled) {
-    var cls = 'visible';
-    if (_dispCode === 'CONFIRMED' || _dispCode === 'HOLD_STILL') cls += ' good';
-    else if (_dispEscalated) cls += ' escalated';
-    setBannerText(_dispHint, cls);
-  }
+  if (banner._enabled) setBannerText(_dispHint);
 
   // Score / state line — shows raw instruction code name
   if (_dispCode === IC.CONFIRMED || _dispCode === IC.HOLD_STILL) {
@@ -1250,8 +1246,8 @@ function handleFrame(frame) {
     scoreEl.style.color = '#ff4757';
   }
 
-  // Hint box — uses throttled hint/escalated flag
-  if (searching) {
+  // Hint box — hidden when banner is active (banner already shows same text on video)
+  if (searching || banner._enabled) {
     hintBox.style.display = 'none';
   } else {
     const isGood = (_dispCode === IC.CONFIRMED || _dispCode === IC.HOLD_STILL);
@@ -1686,7 +1682,7 @@ function resetResultPanel() {
   scoreEl.textContent             = '–';
   scoreEl.style.color             = '#fff';
   hintBox.style.display           = 'none';
-  banner._enabled = false; banner.className = ''; banner.textContent = ''; _bannerShownText = null; _bannerAnimating = false;
+  banner._enabled = false; banner.className = ''; banner.textContent = ''; _bannerShownText = null; _bannerAnimating = false; _bannerPending = null;
   capturedSides                   = [];
   sideSteps.style.display         = 'none';
   sideSteps.innerHTML             = '';
@@ -2219,7 +2215,7 @@ stopBtn.addEventListener('click', () => {
   captureBtn.style.display     = 'none';  // always hide on stop
   captureBtn.disabled          = true;
   if (_autoRestartTimer) { clearTimeout(_autoRestartTimer); _autoRestartTimer = null; }
-  banner._enabled = false; banner.className = ''; _bannerShownText = null; _bannerAnimating = false;
+  banner._enabled = false; banner.className = ''; _bannerShownText = null; _bannerAnimating = false; _bannerPending = null;
   scoreEl.textContent      = '–';
   scoreEl.style.color      = '#fff';
   hintBox.style.display    = 'none';
