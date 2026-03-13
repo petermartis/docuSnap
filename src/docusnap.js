@@ -2901,19 +2901,18 @@
         };
       }
 
-      // ── Confidence gate: suppress display for weak detections ──────────
-      // detect() path: confidence is now the composite score (>= 0.45 guaranteed).
-      // trackEdges() path: confidence = matchedCount/4 — require >= 2/4 lines (0.5).
-      // This prevents the Kalman smoother from locking onto borderline quads.
-      var MIN_DISPLAY_CONFIDENCE = 0.45;
-      if (detConfidence < MIN_DISPLAY_CONFIDENCE) {
-        dispCorners = null;
-        fullCorners  = null;
-      }
-
-      // Suppress display when detected rect is too large — likely laptop/screen, not a card.
-      var detDocSize = report.checks.documentSize ? report.checks.documentSize.value : 0;
-      if (detDocSize > 0.70) {
+      // ── Shape gate: only draw overlay for structurally valid detections ──
+      // All four "object identity" checks must pass before we render ANY bbox.
+      // Lighting/quality checks (sharpness, brightness, glare) don't gate the
+      // overlay — those only affect the capture decision, not object identity.
+      // This prevents bboxes from appearing on laptops, background frames, or
+      // partial text regions that pass a loose confidence threshold.
+      var ch = report.checks;
+      var shapePass = ch.documentSize       && ch.documentSize.pass &&
+                      ch.cornersFound       && ch.cornersFound.pass &&
+                      ch.cornersWithinMargin && ch.cornersWithinMargin.pass &&
+                      ch.confidence         && ch.confidence.pass;
+      if (!shapePass) {
         dispCorners = null;
         fullCorners  = null;
       }
