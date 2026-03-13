@@ -1223,7 +1223,7 @@
             // A keyboard has dense internal edges (key dividers); a flat document doesn't.
             // Threshold: interior edge density > 60% of the boundary edge support → reject.
             var interiorDensity = self._measureInteriorEdgeDensity(sorted, edges, pw, ph);
-            if (interiorDensity > edgeSupport * 0.60) { _rej.interiorTexture = (_rej.interiorTexture || 0) + 1; continue; }
+            if (interiorDensity > edgeSupport * 0.40) { _rej.interiorTexture = (_rej.interiorTexture || 0) + 1; continue; }
 
             // Aspect ratio closeness to nearest known document type
             // Score 1.0 when exact match to any known type, lower when further away
@@ -2153,6 +2153,7 @@
       // 248 = only catch near-white hotspots; white card background (~230-247) is not flagged.
       var glareThreshold = thresholds.glareThreshold !== undefined ? thresholds.glareThreshold : 248;
       var documentSizeMin = thresholds.documentSizeMin !== undefined ? thresholds.documentSizeMin : 0.40;  // bbox width fraction
+      var documentSizeMax = thresholds.documentSizeMax !== undefined ? thresholds.documentSizeMax : 0.75;  // reject if >75% — laptop/screen
       var cornerMarginPx = thresholds.cornerMarginPx !== undefined ? thresholds.cornerMarginPx : 10;
       // Minimum composite-score confidence from the rectangle detector.
       // Must sit well above the detector's 0.45 floor so this is a real additional gate
@@ -2183,7 +2184,7 @@
         glare: { value: glare, pass: glare <= glareMax },
         cornersFound: { value: completeness.allCornersFound, pass: completeness.allCornersFound },
         cornersWithinMargin: { value: completeness.allWithinMargin, pass: completeness.allWithinMargin },
-        documentSize: { value: documentSize, pass: documentSize >= documentSizeMin },
+        documentSize: { value: documentSize, pass: documentSize >= documentSizeMin && documentSize <= documentSizeMax },
         confidence: { value: detConfidence, pass: detConfidence >= confidenceMin },
       };
 
@@ -2859,6 +2860,13 @@
       // This prevents the Kalman smoother from locking onto borderline quads.
       var MIN_DISPLAY_CONFIDENCE = 0.45;
       if (detConfidence < MIN_DISPLAY_CONFIDENCE) {
+        dispCorners = null;
+        fullCorners  = null;
+      }
+
+      // Suppress display when detected rect is too large — likely laptop/screen, not a card.
+      var detDocSize = report.checks.documentSize ? report.checks.documentSize.value : 0;
+      if (detDocSize > 0.75) {
         dispCorners = null;
         fullCorners  = null;
       }
@@ -4374,8 +4382,9 @@
         brightnessMin:   ((q.brightness != null ? q.brightness : 40) / 100) * 178,
         glareMax:        (q.glare          != null ? q.glare          : 18)  / 100,
         glareThreshold:   q.glareThreshold != null ? q.glareThreshold : 225,
-        // documentSizeMin is a bbox-width fraction (0-1); default 40 = 40% of frame width.
+        // documentSizeMin/Max are bbox-width fractions (0-1).
         documentSizeMin: (q.size  != null ? q.size  : 40) / 100,
+        documentSizeMax: 0.75,  // reject detected rects > 75% of frame width (laptop/screen)
         cornerMarginPx:  10,
         // Must be well above the detector's 0.45 floor so confidence is a real gate,
         // not just a pass-through.
