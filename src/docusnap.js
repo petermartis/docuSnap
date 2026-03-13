@@ -2783,20 +2783,40 @@
       var detW = Math.round(vw * detScale);
       var detH = Math.round(vh * detScale);
 
+      // ── Crop to CSS-visible portion of the canvas ──────────────────────
+      // The display canvas container may have max-height + overflow:hidden,
+      // making the bottom portion of the video invisible to the user.
+      // Detect ONLY what the user can actually see — never capture objects
+      // that are below the CSS clip boundary.
+      var visibleFrac = 1;
+      if (this._canvas && this._canvas.parentElement) {
+        var _containerH = this._canvas.parentElement.getBoundingClientRect().height;
+        var _canvasCSSH  = this._canvas.getBoundingClientRect().height;
+        if (_canvasCSSH > 0 && _containerH < _canvasCSSH) {
+          visibleFrac = _containerH / _canvasCSSH;
+        }
+      }
+      // visDetH: detection canvas rows to actually analyse (top portion only)
+      var visDetH = Math.max(30, Math.round(detH * visibleFrac));
+
       var detCanvas = this._detCanvas;
       if (detCanvas.width !== detW || detCanvas.height !== detH) {
         detCanvas.width  = detW;
         detCanvas.height = detH;
       }
       var detCtx = this._detCtx;  // CPU-backed context (willReadFrequently); set at canvas creation
-      detCtx.drawImage(video, 0, 0, detW, detH);
-      var imageData = detCtx.getImageData(0, 0, detW, detH);
+      // Draw only the visible top slice of the video into the detection canvas.
+      detCtx.clearRect(0, 0, detW, detH);
+      detCtx.drawImage(video,
+        0, 0, vw, Math.round(vh * visibleFrac),   // source: top visible fraction
+        0, 0, detW, visDetH);                      // dest: top rows of det canvas
+      var imageData = detCtx.getImageData(0, 0, detW, visDetH);
 
       // ── Detect or track at detection resolution ─────────────────────────
       var detection;
       if (this._trackingMode && this._referenceLines) {
         // TRACK mode: windowed Hough near reference edges (much faster)
-        detection = this._scanner._detector.trackEdges(imageData.data, detW, detH, this._referenceLines);
+        detection = this._scanner._detector.trackEdges(imageData.data, detW, visDetH, this._referenceLines);
         if (detection && detection._lines) {
           this._referenceLines = detection._lines.slice();
           // Check if both long edges (h1, h2) were coasted
@@ -2813,18 +2833,18 @@
           this._trackingMode = false;
           this._referenceLines = null;
           this._trackLostLongEdges = 0;
-          detection = this._scanner._detector.detect(imageData.data, detW, detH);
+          detection = this._scanner._detector.detect(imageData.data, detW, visDetH);
         }
       } else {
         // DETECT mode: full Hough + rectangle assembly
-        detection = this._scanner._detector.detect(imageData.data, detW, detH);
+        detection = this._scanner._detector.detect(imageData.data, detW, visDetH);
       }
       this._updateDebugImageData();  // build debug viz if active
       var detCorners = detection ? detection.cornerPoints : null;
       var detConfidence = detection ? detection.confidence : 0;
 
       var report = this._scanner.assessQuality(
-        imageData.data, detW, detH, detCorners, this._thresholds, detConfidence
+        imageData.data, detW, visDetH, detCorners, this._thresholds, detConfidence
       );
       this._onQualityReport(report);
 
