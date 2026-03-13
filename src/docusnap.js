@@ -2085,15 +2085,12 @@
 
       if (!tl || !tr || !bl || !br) return 0;
 
-      // Shoelace formula for quadrilateral area (vertices in order: TL→TR→BR→BL)
-      var area = Math.abs(
-        tl.x * tr.y - tr.x * tl.y +
-        tr.x * br.y - br.x * tr.y +
-        br.x * bl.y - bl.x * br.y +
-        bl.x * tl.y - tl.x * bl.y
-      ) * 0.5;
-
-      return area / (frameWidth * frameHeight);
+      // Width coverage: bounding-box width as fraction of frame width.
+      // Matches the cfgDocSize threshold (0–100 %) which users calibrate
+      // expecting "how much of the frame width does the card fill".
+      var allX = [tl.x, tr.x, bl.x, br.x];
+      var bboxWidth = Math.max.apply(null, allX) - Math.min.apply(null, allX);
+      return bboxWidth / frameWidth;
     }
 
     /**
@@ -2115,7 +2112,7 @@
       // Pixel brightness threshold for glare detection (0-255).
       // 248 = only catch near-white hotspots; white card background (~230-247) is not flagged.
       var glareThreshold = thresholds.glareThreshold !== undefined ? thresholds.glareThreshold : 248;
-      var documentSizeMin = thresholds.documentSizeMin !== undefined ? thresholds.documentSizeMin : 0.15;  // polygon area fraction
+      var documentSizeMin = thresholds.documentSizeMin !== undefined ? thresholds.documentSizeMin : 0.40;  // bbox width fraction
       var cornerMarginPx = thresholds.cornerMarginPx !== undefined ? thresholds.cornerMarginPx : 10;
       // Minimum composite-score confidence from the rectangle detector.
       // Must sit well above the detector's 0.45 floor so this is a real additional gate
@@ -4337,9 +4334,8 @@
         brightnessMin:   ((q.brightness != null ? q.brightness : 40) / 100) * 178,
         glareMax:        (q.glare          != null ? q.glare          : 18)  / 100,
         glareThreshold:   q.glareThreshold != null ? q.glareThreshold : 225,
-        // documentSizeMin is now a polygon-area fraction (0-1); default 15 = 15% of frame area,
-        // which requires a reasonably-sized card presence.
-        documentSizeMin: (q.size  != null ? q.size  : 15) / 100,
+        // documentSizeMin is a bbox-width fraction (0-1); default 40 = 40% of frame width.
+        documentSizeMin: (q.size  != null ? q.size  : 40) / 100,
         cornerMarginPx:  10,
         // Must be well above the detector's 0.45 floor so confidence is a real gate,
         // not just a pass-through.
