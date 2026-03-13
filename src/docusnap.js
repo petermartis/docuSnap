@@ -280,17 +280,17 @@
 
   /**
    * @param {object} [options]
-   * @param {number} [options.minAspectRatio=1.2] - minimum width/height ratio
-   * @param {number} [options.maxAspectRatio=1.8] - maximum width/height ratio
+   * @param {number} [options.minAspectRatio=1.45] - minimum width/height ratio (ID-1/passport range)
+   * @param {number} [options.maxAspectRatio=1.72] - maximum width/height ratio (ID-1/passport range)
    * @param {number} [options.minWidthFraction=0.40] - min document width as fraction of frame width
    * @param {number} [options.maxAreaFraction=0.85] - max document area as fraction of frame
    * @param {number} [options.processWidth=480] - downscale width for processing speed
    */
   function DocumentDetector(options) {
     options = options || {};
-    // Aspect ratio for ID cards (1.586) and passports (1.42) with ~20% tolerance
-    this._minAspect = options.minAspectRatio != null ? options.minAspectRatio : 1.2;
-    this._maxAspect = options.maxAspectRatio != null ? options.maxAspectRatio : 1.8;
+    // Aspect ratio: ID-1 (1.586) and ID-3/passport (1.420), ±~10% tolerance
+    this._minAspect = options.minAspectRatio != null ? options.minAspectRatio : 1.45;
+    this._maxAspect = options.maxAspectRatio != null ? options.maxAspectRatio : 1.72;
     this._minWidthFraction = options.minWidthFraction != null ? options.minWidthFraction : 0.30;  // 30% minimum — rejects sub-card blobs while still detecting at natural holding distances
     this._maxAreaFraction = options.maxAreaFraction != null ? options.maxAreaFraction : 0.85;
     this._processWidth = options.processWidth || 480;  // Higher res for better edge detection
@@ -1009,8 +1009,11 @@
     if (hLines.length > 10) hLines = hLines.slice(0, 10);
     if (vLines.length > 10) vLines = vLines.slice(0, 10);
 
-    // Known document aspect ratios (landscape and portrait)
-    var knownAspects = [1.586, 1.417, 1.294, 0.707, 0.773]; // ID, passport, letter, A4-portrait, letter-portrait
+    // Known document aspect ratios used for aspectScore.
+    // The midpoint of the allowed range is used as the primary target so scoring
+    // rewards aspects near the centre of whatever document type is active.
+    var aspectMid = (self._minAspect + self._maxAspect) / 2;
+    var knownAspects = [aspectMid, 1.586, 1.417]; // target mid + ID-1 + passport as fallback hints
 
     var bestResult = null;
     var bestScore = -1;
@@ -1133,9 +1136,9 @@
             // from 90° are correlated (they must sum to 0).  Instead of
             // checking each corner independently against a wide band, we
             // limit the TOTAL absolute deviation: sum(|angle_i - 90°|).
-            // Real extreme perspective ≈ 80°; impossible grout quads > 100°.
-            var maxTotalDeviation = 80;  // degrees — total budget across all 4 corners
-            var maxSingleAngleDeviation = 30;  // no single corner beyond 60-120°
+            // Real extreme perspective on a flat card ≈ 40-50°; non-rectangular shapes exceed 80°.
+            var maxTotalDeviation = 50;  // degrees — total budget across all 4 corners (tighter: real IDs held at normal angles)
+            var maxSingleAngleDeviation = 20;  // no single corner beyond 70-110°
             var anglesOk = true;
             var totalDeviation = 0;
             for (var ai = 0; ai < 4; ai++) {
@@ -1184,7 +1187,7 @@
             // (e.g., fingers/hands/background).
             var edgeSupport = self._measureEdgeSupport(sorted, edges, pw, ph);
 
-            if (edgeSupport < 0.15) { _rej.edgeSupport++; continue; }
+            if (edgeSupport < 0.35) { _rej.edgeSupport++; continue; }
 
             // Aspect ratio closeness to nearest known document type
             // Score 1.0 when exact match to any known type, lower when further away
@@ -1221,10 +1224,17 @@
                       + centerScore * 0.10
                       + outerScore  * 0.15;
 
+            // Reject weak candidates before tracking bonus can rescue them.
+            // A base score < 0.40 means the quad doesn't look like a document
+            // even ignoring frame-to-frame continuity.
+            if (score < 0.40) { _rej.weakScore = (_rej.weakScore || 0) + 1; continue; }
+
             // Tracking proximity bonus: when we have known lines from a
             // previous frame, boost quads whose lines are close to them.
             // This prevents the tracker from jumping to a distant line
             // just because it got a few more votes this frame.
+            // Capped at +0.10 (was +0.20) so it stabilises good detections
+            // without rescuing borderline ones.
             if (self._knownLines && self._knownLines.length === 4) {
               var quadLines = [h1, h2, v1, v2];
               var totalProx = 0;
@@ -1243,7 +1253,7 @@
                 totalProx += Math.max(0, 1.0 - bestDist / 70);
               }
               var proxScore = totalProx / 4; // average over 4 known lines
-              score += proxScore * 0.20; // up to 0.20 bonus for continuity
+              score += proxScore * 0.10; // up to 0.10 bonus for continuity (was 0.20)
             }
 
             if (score > bestScore) {
@@ -1256,7 +1266,7 @@
                   w: avgW * invScale,
                   h: avgH * invScale,
                 },
-                confidence: edgeSupport,
+                confidence: score,  // composite score (was: edgeSupport only)
                 cornerPoints: {
                   topLeftCorner:     { x: sorted[0].x * invScale, y: sorted[0].y * invScale },
                   topRightCorner:    { x: sorted[1].x * invScale, y: sorted[1].y * invScale },
@@ -1270,6 +1280,13 @@
         }
       }
     }
+
+    // Final gate: discard the best candidate if its composite score is still too low.
+    // Candidates with score >= 0.40 can reach this point via Fix H gate, but only
+    // those >= 0.45 are strong enough to report (avoids returning marginal detections
+    // that survive because they're the sole candidate in a given frame).
+    var MIN_DETECTION_SCORE = 0.45;
+    if (bestScore < MIN_DETECTION_SCORE) bestResult = null;
 
     this._lastRejections = _rej;
     if (_dbg) console.log('[docuSnap] rejection counts:', _rej, '| best score:', bestResult ? Math.round((bestResult.confidence||0)*100)+'%' : 'none');
@@ -1292,8 +1309,8 @@
    */
   DocumentDetector.prototype._measureEdgeSupport = function (corners, edges, w, h) {
     var tolerance = 8;   // pixels — how far from the line to look for edges (wider to account for blur + downscale)
-    var minSupportRequired = 0.15;  // If any single side < 15%, return that (not avg)
-    var maxGapFraction = 0.40;  // Allow gaps from rounded corners / fingers
+    var minSupportRequired = 0.35;  // If any single side < 35%, return that (not avg) — real card edges are solid
+    var maxGapFraction = 0.25;  // Allow gaps from rounded corners / fingers (was 0.40 — tighter rejects partial edges)
 
     // 4 sides: TL→TR, TR→BR, BR→BL, BL→TL
     var sides = [
@@ -1672,8 +1689,8 @@
    * No ML model or external dependencies needed.
    *
    * @param {object} [options]
-   * @param {number} [options.minAspectRatio=1.2] - min width/height for card detection
-   * @param {number} [options.maxAspectRatio=1.8] - max width/height for card detection
+   * @param {number} [options.minAspectRatio=1.45] - min width/height for card detection
+   * @param {number} [options.maxAspectRatio=1.72] - max width/height for card detection
    * @param {number} [options.minWidthFraction=0.40] - min document width as fraction of frame width
    */
   class docuSnap {
@@ -2067,10 +2084,10 @@
       var glareThreshold = thresholds.glareThreshold !== undefined ? thresholds.glareThreshold : 248;
       var documentSizeMin = thresholds.documentSizeMin !== undefined ? thresholds.documentSizeMin : 0.15;
       var cornerMarginPx = thresholds.cornerMarginPx !== undefined ? thresholds.cornerMarginPx : 10;
-      // Minimum edge-support confidence from the rectangle detector.
-      // 0.15 = detector's internal floor; 0.30 = stronger gate to reject false positives
-      // (e.g. bags, clothing edges) that pass sharpness/brightness but aren't real documents.
-      var confidenceMin = thresholds.confidenceMin !== undefined ? thresholds.confidenceMin : 0.30;
+      // Minimum composite-score confidence from the rectangle detector.
+      // detect() now exports the full composite score (not just edgeSupport) and won't
+      // return below 0.45, so this threshold aligns with the detector's own floor.
+      var confidenceMin = thresholds.confidenceMin !== undefined ? thresholds.confidenceMin : 0.45;
 
       // Convert to grayscale once, reuse for all quality checks
       var gray = this._quality.rgbaToGrayscale(rgba, w, h);
@@ -2756,6 +2773,16 @@
           bottomRightCorner: { x: detCorners.bottomRightCorner.x * toFull, y: detCorners.bottomRightCorner.y * toFull },
           bottomLeftCorner:  { x: detCorners.bottomLeftCorner.x  * toFull, y: detCorners.bottomLeftCorner.y  * toFull },
         };
+      }
+
+      // ── Confidence gate: suppress display for weak detections ──────────
+      // detect() path: confidence is now the composite score (>= 0.45 guaranteed).
+      // trackEdges() path: confidence = matchedCount/4 — require >= 2/4 lines (0.5).
+      // This prevents the Kalman smoother from locking onto borderline quads.
+      var MIN_DISPLAY_CONFIDENCE = 0.45;
+      if (detConfidence < MIN_DISPLAY_CONFIDENCE) {
+        dispCorners = null;
+        fullCorners  = null;
       }
 
       // ── Kalman smoother operates in display space ──────────────────────
@@ -3995,8 +4022,11 @@
       this._lastCode        = null;
       this._codeRepeatCount = 0;
       this._scanState       = 'ready';
-      // Rebuild thresholds for the new side
+      // Rebuild thresholds and aspect limits for the new side
       this._thresholds = this._buildThresholds(this._currentSideConfig());
+      var limits = this._aspectLimits(this._currentSideDocType());
+      this._core._detector._minAspect = limits.min;
+      this._core._detector._maxAspect = limits.max;
       if (this._autoCapture) {
         this._autoCapture._thresholds = this._thresholds;
         this._autoCapture.reset();
@@ -4304,7 +4334,11 @@
 
     _aspectLimits(docType) {
       var m = {
-        id:       { min: 1.2, max: 1.8 },   // ID cards + passports (credit-card shape)
+        // ISO 7810 ID-1 (credit/driver's licence): 85.6×54mm = 1.586
+        // ISO 7810 ID-3 (passport booklet): 125×88mm = 1.420
+        // Tighter range (was 1.2–1.8) rejects letter paper (1.29), A4 landscape (1.41),
+        // and business cards in portrait orientation (≈1.75) that aren't ID-type docs.
+        id:       { min: 1.45, max: 1.72 },
         document: { min: 0.55, max: 1.6 },  // A4/Letter portrait (0.707) + landscape (1.414)
         any:      { min: 0.55, max: 2.2 },  // relaxed — portrait & landscape
       };
