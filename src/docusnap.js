@@ -242,7 +242,7 @@
     // Decay velocity toward zero during coast — a stationary document shouldn't
     // drift. Without decay, even tiny velocity estimates accumulate over many
     // missed frames and push the box off-screen.
-    this.v *= 0.85;  // 15% velocity decay per coast step
+    this.v *= 0.92;  // 8% velocity decay per coast step (gentler to avoid catch-up failures)
     this.x = this.x + this.v;
     var P00 = this.P00 + this.P01 + this.P10 + this.P11 + this.Q;
     var P01 = this.P01 + this.P11;
@@ -326,8 +326,12 @@
    * @param {number} h - image height
    * @returns {object|null} { bbox, confidence, cornerPoints } or null
    */
-  DocumentDetector.prototype.detect = function (rgba, w, h) {
-    // 1. Downscale for speed
+  /**
+   * @private - Shared edge computation pipeline used by both detect() and trackEdges().
+   * Downscales, converts to grayscale, blurs, and runs Sobel edge detection.
+   * @returns {{ edges: Uint8Array, gray: Uint8Array, pw: number, ph: number, scale: number }}
+   */
+  DocumentDetector.prototype._computeEdgeMap = function (rgba, w, h) {
     var scale = 1;
     var pw = w, ph = h;
     if (w > this._processWidth) {
@@ -336,7 +340,6 @@
       ph = Math.round(h * scale);
     }
 
-    // Get grayscale at processing resolution
     var gray;
     if (scale < 1) {
       gray = this._downscaleGray(rgba, w, h, pw, ph);
@@ -348,12 +351,15 @@
       }
     }
 
-    // 2. Dual-zone Gaussian blur: heavier (two-pass 5x5) outside center ROI,
-    //    standard 5x5 in center where card is expected — suppresses desk texture
     var blurred = this._dualZoneBlur(gray, pw, ph);
-
-    // 3. Sobel edge detection with gradient magnitude
     var edges = this._sobelEdges(blurred, pw, ph);
+    return { edges: edges, gray: gray, pw: pw, ph: ph, scale: scale };
+  };
+
+  DocumentDetector.prototype.detect = function (rgba, w, h) {
+    // 1. Compute edge map (shared with trackEdges)
+    var em = this._computeEdgeMap(rgba, w, h);
+    var edges = em.edges, pw = em.pw, ph = em.ph, scale = em.scale;
 
     // 4. Hough line transform on edge pixels
     var lines = this._houghLines(edges, pw, ph);
@@ -1425,6 +1431,168 @@
   };
 
   /**
+   * @private - Find the strongest Hough peak within a narrow (rho, theta) window
+   * around a reference line. Used by trackEdges() for frame-to-frame edge tracking.
+   *
+   * @param {Uint8Array} edges - Binary edge map (255=edge)
+   * @param {number} w - Edge map width
+   * @param {number} h - Edge map height
+   * @param {{ rho: number, theta: number }} refLine - Reference line to search near
+   * @param {number} thetaWindowDeg - Half-window for theta search in degrees
+   * @param {number} rhoWindowPx - Half-window for rho search in pixels
+   * @returns {{ rho: number, theta: number, votes: number }|null}
+   */
+  DocumentDetector.prototype._windowedHoughPeak = function (edges, w, h, refLine, thetaWindowDeg, rhoWindowPx) {
+    var numAngles = this._numAngles;
+    var sinT = this._sinTable;
+    var cosT = this._cosTable;
+    var diag = Math.ceil(Math.sqrt(w * w + h * h));
+
+    // Theta index range (each index = 1 degree since numAngles=180)
+    var refThetaIdx = Math.round(refLine.theta * numAngles / Math.PI);
+    var thetaMin = Math.max(0, refThetaIdx - thetaWindowDeg);
+    var thetaMax = Math.min(numAngles - 1, refThetaIdx + thetaWindowDeg);
+    var numTheta = thetaMax - thetaMin + 1;
+
+    // Rho index range (rho stored as signed, accumulator offset by +diag)
+    var refRhoIdx = Math.round(refLine.rho) + diag;
+    var rhoMin = Math.max(0, refRhoIdx - rhoWindowPx);
+    var rhoMax = Math.min(2 * diag, refRhoIdx + rhoWindowPx);
+    var numRho = rhoMax - rhoMin + 1;
+
+    // Small accumulator for the window
+    var acc = new Uint16Array(numTheta * numRho);
+
+    // Vote only at angles within the window
+    for (var y = 1; y < h - 1; y++) {
+      for (var x = 1; x < w - 1; x++) {
+        if (!edges[y * w + x]) continue;
+        for (var ai = thetaMin; ai <= thetaMax; ai++) {
+          var rho = Math.round(x * cosT[ai] + y * sinT[ai]) + diag;
+          if (rho >= rhoMin && rho <= rhoMax) {
+            acc[(ai - thetaMin) * numRho + (rho - rhoMin)]++;
+          }
+        }
+      }
+    }
+
+    // Find peak
+    var bestVotes = 0, bestAi = 0, bestRi = 0;
+    for (var ai = 0; ai < numTheta; ai++) {
+      for (var ri = 0; ri < numRho; ri++) {
+        if (acc[ai * numRho + ri] > bestVotes) {
+          bestVotes = acc[ai * numRho + ri];
+          bestAi = ai;
+          bestRi = ri;
+        }
+      }
+    }
+
+    // Minimum vote threshold — lower than full detect since we're searching a known edge
+    var minVotes = Math.max(20, w * this._minWidthFraction * 0.10);
+    if (bestVotes < minVotes) return null;
+
+    return {
+      rho: bestRi + rhoMin - diag,
+      theta: (bestAi + thetaMin) * Math.PI / numAngles,
+      votes: bestVotes,
+    };
+  };
+
+  /**
+   * Lightweight edge tracker: given 4 reference edge lines from a previous
+   * detection, search for each edge near its predicted position using a
+   * windowed Hough transform. Much faster than full detect() + rectangle assembly.
+   *
+   * @param {Uint8ClampedArray} rgba - RGBA pixel data
+   * @param {number} w - Image width
+   * @param {number} h - Image height
+   * @param {Array} referenceLines - [h1, h2, v1, v2] from previous detection._lines
+   * @returns {object|null} { cornerPoints, confidence, _lines, _trackedEdgeCount }
+   */
+  DocumentDetector.prototype.trackEdges = function (rgba, w, h, referenceLines) {
+    if (!referenceLines || referenceLines.length !== 4) return null;
+
+    // 1. Compute edge map (shared pipeline with detect)
+    var em = this._computeEdgeMap(rgba, w, h);
+    var edges = em.edges, pw = em.pw, ph = em.ph, scale = em.scale;
+
+    // Scale reference lines from detection-space of previous frame to current
+    // (both are at _processWidth so no scaling needed unless resolution changed)
+
+    // 2. Search for each reference edge in a narrow window
+    var THETA_WINDOW = 5;   // ±5 degrees
+    var RHO_WINDOW   = 15;  // ±15 pixels in processing space
+    var updatedLines = [];
+    var matchedCount = 0;
+
+    for (var li = 0; li < 4; li++) {
+      var ref = referenceLines[li];
+      var peak = this._windowedHoughPeak(edges, pw, ph, ref, THETA_WINDOW, RHO_WINDOW);
+      if (peak) {
+        peak._family = ref._family;
+        peak._coasted = false;
+        updatedLines.push(peak);
+        matchedCount++;
+      } else {
+        // Coast: keep reference line position
+        updatedLines.push({
+          rho: ref.rho, theta: ref.theta, votes: 0,
+          _family: ref._family, _coasted: true,
+        });
+      }
+    }
+
+    // 3. Reconstruct corners from the 4 lines
+    // h1(top) × v1(left) = TL, h1 × v2(right) = TR, h2(bottom) × v2 = BR, h2 × v1 = BL
+    var h1 = updatedLines[0], h2 = updatedLines[1];
+    var v1 = updatedLines[2], v2 = updatedLines[3];
+    var tl = this._lineIntersection(h1, v1);
+    var tr = this._lineIntersection(h1, v2);
+    var br = this._lineIntersection(h2, v2);
+    var bl = this._lineIntersection(h2, v1);
+
+    if (!tl || !tr || !br || !bl) return null;
+
+    // 4. Minimal validation: convexity only
+    var sorted = this._sortCorners([tl, tr, br, bl]);
+    // Cross-product check for convexity
+    var convex = true;
+    for (var i = 0; i < 4; i++) {
+      var a = sorted[i];
+      var b = sorted[(i + 1) % 4];
+      var c = sorted[(i + 2) % 4];
+      var cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+      if (cross < 0) { convex = false; break; }
+    }
+    if (!convex) return null;
+
+    // 5. Check all corners within frame bounds (with small margin)
+    var margin = pw * 0.05;
+    for (var i = 0; i < 4; i++) {
+      if (sorted[i].x < -margin || sorted[i].x > pw + margin ||
+          sorted[i].y < -margin || sorted[i].y > ph + margin) return null;
+    }
+
+    // Scale corners back to input resolution
+    var invScale = scale < 1 ? 1 / scale : 1;
+    var confidence = matchedCount / 4;
+
+    return {
+      bbox: null,  // not needed for tracking
+      confidence: confidence,
+      cornerPoints: {
+        topLeftCorner:     { x: sorted[0].x * invScale, y: sorted[0].y * invScale },
+        topRightCorner:    { x: sorted[1].x * invScale, y: sorted[1].y * invScale },
+        bottomRightCorner: { x: sorted[2].x * invScale, y: sorted[2].y * invScale },
+        bottomLeftCorner:  { x: sorted[3].x * invScale, y: sorted[3].y * invScale },
+      },
+      _lines: updatedLines,
+      _trackedEdgeCount: matchedCount,
+    };
+  };
+
+  /**
    * @private - Correct outlier corner using parallelogram geometry.
    * For a perfect rectangle/parallelogram: TL + BR = TR + BL (diagonals bisect each other).
    * If 3 corners are good, the 4th can be computed from them.
@@ -2027,7 +2195,14 @@
       
       // Render-lerp state: smoothly interpolated corners for 60fps drawing
       this._renderCorners = null;
-      
+
+      // Edge tracking mode: after confident detection, track edges instead
+      // of running full rectangle re-detection each frame
+      this._trackingMode = false;
+      this._referenceLines = null;         // [h1, h2, v1, v2] from last confident detection
+      this._trackLostLongEdges = 0;        // Consecutive frames where both h-lines lost
+      this._maxTrackLostLongEdges = 10;    // Fall back to full detect after this many (~1s)
+
       // Bounding box overlay opacity state (0 = clear, 70 = max overlay)
       this._currentTransparency = 70;    // Start with overlay (will fade as quality improves)
       this._transparencyStep = 5;        // Change by 5% per frame
@@ -2039,10 +2214,6 @@
       this._lastDispW = 0;
       this._lastDispH = 0;
       this._lastReport = null;
-      this._lastInstruction = '';        // Current feedback text for canvas overlay
-      this._pendingInstruction = '';    // Next text, queued during fade-out
-      this._instructionOpacity = 0;     // Current opacity (0–1) for fade animation
-      this._instructionFadeTarget = 0;  // Target opacity (0 or 1)
     }
 
     start() {
@@ -2066,6 +2237,9 @@
       this._renderCorners = null;        // Reset render-lerp state
       this._cornerRejectCount = 0;
       this._kalmanFilters = null;
+      this._trackingMode = false;          // Reset edge tracking
+      this._referenceLines = null;
+      this._trackLostLongEdges = 0;
       this._currentTransparency = 70;    // Reset overlay opacity
       // Initialize display dimensions from video if available
       if (this._video && this._video.videoWidth) {
@@ -2078,10 +2252,6 @@
         this._lastDispH = 0;
       }
       this._lastReport = null;
-      this._lastInstruction = '';
-      this._pendingInstruction = '';
-      this._instructionOpacity = 0;
-      this._instructionFadeTarget = 0;
       // Persistent small canvas reused every frame for detection (avoids per-frame allocation)
       if (!this._detCanvas) this._detCanvas = document.createElement("canvas");
       this._sessionStartTime = performance.now(); // suppress bbox for first 3s
@@ -2094,30 +2264,6 @@
       if (this._animFrameId) {
         cancelAnimationFrame(this._animFrameId);
         this._animFrameId = null;
-      }
-    }
-
-    /**
-     * Set the instruction text shown on the canvas overlay.
-     * Call from the onFrame callback with throttled/mapped text.
-     * Pass empty string to fade out the instruction.
-     */
-    setCanvasInstruction(text) {
-      text = text || '';
-      if (text === this._lastInstruction && text === this._pendingInstruction) return;
-      if (!text) {
-        // Fade out current text
-        this._pendingInstruction = '';
-        this._instructionFadeTarget = 0;
-      } else if (!this._lastInstruction || this._instructionOpacity < 0.05) {
-        // Nothing showing — set text directly and fade in
-        this._lastInstruction = text;
-        this._pendingInstruction = text;
-        this._instructionFadeTarget = 1;
-      } else if (text !== this._lastInstruction) {
-        // Different text while something is showing — queue and fade out first
-        this._pendingInstruction = text;
-        this._instructionFadeTarget = 0;
       }
     }
 
@@ -2438,22 +2584,6 @@
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(dc, 0, 0, dispW, dispH);
         ctx.imageSmoothingEnabled = true;
-
-        // Still show instruction text in debug mode
-        var fadeSpeed = 0.042;
-        if (this._instructionOpacity < this._instructionFadeTarget) {
-          this._instructionOpacity = Math.min(1, this._instructionOpacity + fadeSpeed);
-        } else if (this._instructionOpacity > this._instructionFadeTarget) {
-          this._instructionOpacity = Math.max(0, this._instructionOpacity - fadeSpeed);
-        }
-        if (this._instructionOpacity < 0.02 && this._pendingInstruction &&
-            this._pendingInstruction !== this._lastInstruction) {
-          this._lastInstruction = this._pendingInstruction;
-          this._instructionFadeTarget = 1;
-        }
-        if (this._instructionOpacity > 0.01 && this._lastInstruction) {
-          this._drawInstruction(ctx, this._lastInstruction, dispW, dispH, this._instructionOpacity);
-        }
         return;  // skip normal video + spotlight rendering
       }
 
@@ -2520,65 +2650,6 @@
         ctx.fillRect(0, 0, dispW, dispH);
       }
 
-      // Animate instruction opacity towards target (~250ms fade)
-      var fadeSpeed = 0.042;  // per frame at 60fps ≈ 400ms transition
-      if (this._instructionOpacity < this._instructionFadeTarget) {
-        this._instructionOpacity = Math.min(1, this._instructionOpacity + fadeSpeed);
-      } else if (this._instructionOpacity > this._instructionFadeTarget) {
-        this._instructionOpacity = Math.max(0, this._instructionOpacity - fadeSpeed);
-      }
-
-      // When fade-out completes and there's pending text, swap and fade in
-      if (this._instructionOpacity < 0.02 && this._pendingInstruction &&
-          this._pendingInstruction !== this._lastInstruction) {
-        this._lastInstruction = this._pendingInstruction;
-        this._instructionFadeTarget = 1;
-      }
-
-      // Draw instruction text with current opacity
-      if (this._instructionOpacity > 0.01 && this._lastInstruction) {
-        this._drawInstruction(ctx, this._lastInstruction, dispW, dispH, this._instructionOpacity);
-      }
-    }
-
-    /** @private - Draw feedback instruction text centered on the canvas */
-    _drawInstruction(ctx, text, w, h, opacity) {
-      var fontSize = Math.max(14, Math.round(w * 0.035));
-      ctx.save();
-      ctx.globalAlpha = opacity;
-      ctx.font = '600 ' + fontSize + 'px -apple-system, BlinkMacSystemFont, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-
-      // Position: lower third of the canvas
-      var y = h * 0.85;
-
-      // Semi-transparent pill background
-      var metrics = ctx.measureText(text);
-      var padX = fontSize * 0.8;
-      var padY = fontSize * 0.45;
-      var pillW = metrics.width + padX * 2;
-      var pillH = fontSize + padY * 2;
-      var pillX = (w - pillW) / 2;
-      var pillY = y - pillH / 2;
-      var radius = pillH / 2;
-
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
-      ctx.beginPath();
-      ctx.moveTo(pillX + radius, pillY);
-      ctx.lineTo(pillX + pillW - radius, pillY);
-      ctx.arcTo(pillX + pillW, pillY, pillX + pillW, pillY + pillH, radius);
-      ctx.arcTo(pillX + pillW, pillY + pillH, pillX, pillY + pillH, radius);
-      ctx.lineTo(pillX + radius, pillY + pillH);
-      ctx.arcTo(pillX, pillY + pillH, pillX, pillY, radius);
-      ctx.arcTo(pillX, pillY, pillX + pillW, pillY, radius);
-      ctx.closePath();
-      ctx.fill();
-
-      // White text
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(text, w / 2, y);
-      ctx.restore();
     }
 
     /**
@@ -2625,8 +2696,33 @@
       detCtx.drawImage(video, 0, 0, detW, detH);
       var imageData = detCtx.getImageData(0, 0, detW, detH);
 
-      // ── Detect + assess at detection resolution ────────────────────────
-      var detection  = this._scanner._detector.detect(imageData.data, detW, detH);
+      // ── Detect or track at detection resolution ─────────────────────────
+      var detection;
+      if (this._trackingMode && this._referenceLines) {
+        // TRACK mode: windowed Hough near reference edges (much faster)
+        detection = this._scanner._detector.trackEdges(imageData.data, detW, detH, this._referenceLines);
+        if (detection && detection._lines) {
+          this._referenceLines = detection._lines.slice();
+          // Check if both long edges (h1, h2) were coasted
+          if (detection._lines[0]._coasted && detection._lines[1]._coasted) {
+            this._trackLostLongEdges++;
+          } else {
+            this._trackLostLongEdges = 0;
+          }
+        } else {
+          this._trackLostLongEdges++;
+        }
+        // Fall back to full detection if long edges lost for too long
+        if (this._trackLostLongEdges >= this._maxTrackLostLongEdges) {
+          this._trackingMode = false;
+          this._referenceLines = null;
+          this._trackLostLongEdges = 0;
+          detection = this._scanner._detector.detect(imageData.data, detW, detH);
+        }
+      } else {
+        // DETECT mode: full Hough + rectangle assembly
+        detection = this._scanner._detector.detect(imageData.data, detW, detH);
+      }
       this._updateDebugImageData();  // build debug viz if active
       var detCorners = detection ? detection.cornerPoints : null;
       var detConfidence = detection ? detection.confidence : 0;
@@ -2704,6 +2800,13 @@
             this._state = State.STAY_STILL;
             this._stayStillStart = performance.now();
             this._onStateChange(State.STAY_STILL, "Hold still...");
+
+            // Enter edge tracking mode if detection produced valid reference lines
+            if (detection && detection._lines && detection._lines.length === 4) {
+              this._trackingMode = true;
+              this._referenceLines = detection._lines.slice();
+              this._trackLostLongEdges = 0;
+            }
           }
         } else {
           this._consecutiveGoodFrames = 0;
@@ -2721,6 +2824,9 @@
           this._consecutiveGoodFrames = 0;
           this._frameBuffer = [];
           this._lastGoodCorners = null;
+          this._trackingMode = false;          // Exit edge tracking
+          this._referenceLines = null;
+          this._trackLostLongEdges = 0;
           this._onStateChange(State.DETECTING, "Position document in frame");
         } else if (!this._manualMode) {
           // Auto mode: capture after stayStillDurationMs
@@ -2918,6 +3024,9 @@
           this._displayCorners = null;
           this._renderCorners = null;
           this._kalmanFilters = null;
+          this._trackingMode = false;
+          this._referenceLines = null;
+          this._trackLostLongEdges = 0;
         }
         return;
       }
@@ -2937,7 +3046,7 @@
       // Update Kalman filters with new measurements
       var cornerKeys = ['topLeftCorner', 'topRightCorner', 'bottomLeftCorner', 'bottomRightCorner'];
       var smoothed = {};
-      var maxMove = Math.max(frameW, frameH) * 0.06;  // 6% clamp per detection frame (was 15%)
+      var maxMove = Math.max(frameW, frameH) * 0.12;  // 12% clamp per detection frame
 
       // Outlier gate: if ANY corner jumps more than 20% of frame size from its
       // Kalman prediction, treat the entire detection as a false positive and
@@ -2979,8 +3088,9 @@
         var filteredX = this._kalmanFilters[i * 2].update(measurement.x);
         var filteredY = this._kalmanFilters[i * 2 + 1].update(measurement.y);
 
-        // 6% max change clamp: prevent sudden jumps from noisy detections
-        if (this._displayCorners) {
+        // Position clamp: prevent sudden jumps from noisy detections.
+        // Skip in tracking mode — windowed Hough already constrains search to ±15px.
+        if (!this._trackingMode && this._displayCorners) {
           var prevX = this._displayCorners[key].x;
           var prevY = this._displayCorners[key].y;
           var dx = filteredX - prevX;
@@ -3869,11 +3979,6 @@
       if (this._autoCapture) {
         this._autoCapture.capture();
       }
-    }
-
-    /** Set the instruction text shown on the canvas overlay (with fade animation). */
-    setCanvasInstruction(text) {
-      if (this._autoCapture) this._autoCapture.setCanvasInstruction(text);
     }
 
     /** Set the active debug visualization layer for the detection pipeline.

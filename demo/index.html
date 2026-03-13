@@ -743,13 +743,6 @@
                  style="width:100%;margin-top:4px;background:#0d0d1a;border:1px solid #333;
                         border-radius:6px;color:#fff;padding:5px 8px;font-size:12px;">
         </label>
-        <label style="grid-column:1/-1">Anthropic API Key
-          <input type="text" id="cfgAnthropicKey"
-                 value=""
-                 placeholder="sk-ant-..."
-                 style="width:100%;margin-top:4px;background:#0d0d1a;border:1px solid #333;
-                        border-radius:6px;color:#fff;padding:5px 8px;font-size:12px;">
-        </label>
       </div>
       <div style="margin-top:12px;border-top:1px solid #333;padding-top:10px;">
         <div style="font-size:12px;color:#aaa;margin-bottom:8px;">Instruction Messages</div>
@@ -948,11 +941,11 @@ function onDocTypeChange() {
 
 // ── Settings persistence ──────────────────────────────────────────────────
 const SETTINGS_KEY = 'docusnap_settings';
-const SETTING_IDS  = ['cfgDocType','cfgMode','cfgSides','cfgFace','cfgSharpness','cfgBrightness','cfgGlare','cfgDocSize','cfgLivenessProxy','cfgAnthropicKey',
+const SETTING_IDS  = ['cfgDocType','cfgMode','cfgSides','cfgFace','cfgSharpness','cfgBrightness','cfgGlare','cfgDocSize','cfgLivenessProxy',
   'msg_SEARCHING','msg_MOVE_CLOSER','msg_CENTER_DOCUMENT','msg_SHARPEN','msg_REDUCE_GLARE','msg_IMPROVE_LIGHTING','msg_HOLD_STILL','msg_CONFIRMED'];
 
 // IDs that are shared via config.json (persisted server-side for all users)
-const SHARED_SETTING_IDS = ['cfgAnthropicKey'];
+const SHARED_SETTING_IDS = [];
 
 function saveSettings() {
   try {
@@ -1184,10 +1177,6 @@ function handleFrame(frame) {
 
   // Resolve which instruction code/hint to display (throttled for failures).
   resolveDisplayCode(frame);
-
-  // Feed customizable message text to canvas overlay only
-  var canvasText = _dispCode ? getInstructionText(_dispCode) : '';
-  if (snap) snap.setCanvasInstruction(canvasText);
 
   // Update step indicator from live sideIndex (shows which side is being scanned)
   if (frame.sidesTotal > 1) updateSideSteps(frame.sideIndex, frame.sidesTotal);
@@ -2036,9 +2025,6 @@ async function sendToGuru() {
   var _sides = capturedSides.length ? capturedSides : _lastCompletedSides;
   if (!_sides.length) { alert('No capture available.'); return; }
 
-  var apiKey = document.getElementById('cfgAnthropicKey').value.trim();
-  if (!apiKey) { alert('Set Anthropic API Key in Settings.'); return; }
-
   guruBtn.disabled = true;
   guruBtn.innerHTML = '<span class="api-spin"></span> Analysing…';
   showApiWait('Anthropic');
@@ -2069,14 +2055,10 @@ async function sendToGuru() {
       { type: 'text', text: 'Extract data from this document. Return ONLY one JSON object following this schema exactly:\n\n' + GURU_SCHEMA },
     ].concat(imageBlocks);
 
-    var resp = await fetch('https://api.anthropic.com/v1/messages', {
+    var proxyBase = document.getElementById('cfgLivenessProxy').value.trim() || 'http://localhost:3001';
+    var resp = await fetch(proxyBase + '/anthropic', {
       method: 'POST',
-      headers: {
-        'x-api-key':       apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type':    'application/json',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model:      'claude-sonnet-4-6',
         max_tokens: 1024,
@@ -2229,7 +2211,6 @@ applyConfig.addEventListener('click', () => {
 });
 
 // Auto-save API key on change so it persists without needing Apply
-document.getElementById('cfgAnthropicKey').addEventListener('input', saveSettings);
 document.getElementById('cfgLivenessProxy').addEventListener('input', saveSettings);
 </script>
 </body>

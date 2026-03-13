@@ -178,17 +178,6 @@ Reset to the initial state: side index returns to 0, the candidate queue is clea
 
 ---
 
-### `setCanvasInstruction(text)`
-
-Set the instruction text shown on the canvas overlay. The text fades in/out smoothly when changed. Pass an empty string to fade out the current instruction.
-
-```js
-snap.setCanvasInstruction('Place your ID card on a flat surface');
-// Later, clear the instruction:
-snap.setCanvasInstruction('');
-```
-
-This is useful for displaying custom guidance text on the live preview canvas from within your `onFrame` callback.
 
 ---
 
